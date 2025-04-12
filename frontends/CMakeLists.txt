@@ -87,6 +87,7 @@ set (P4_FRONTEND_SRCS
   )
 
 set (P4_FRONTEND_HDRS
+  p4/IRPrinter.h
   p4/actionsInlining.h
   p4/alias.h
   p4/callGraph.h
