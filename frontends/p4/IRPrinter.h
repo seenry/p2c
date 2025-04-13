@@ -11,11 +11,11 @@ public:
     bool preorder(const IR::Node* node) override {
         std::cout << "\n=== IR Dump: " << label << " ===\n";
         std::cout << node << std::endl;
-        return false; // Don't recurse deeply
+        return false;
     }
     
 private:
     std::string label;
 };
 
-}  // namespace P4
+}
