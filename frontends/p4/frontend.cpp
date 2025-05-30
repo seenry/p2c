@@ -171,9 +171,9 @@ const IR::P4Program *FrontEnd::run(const CompilerOptions &options, const IR::P4P
         new CheckShadowing(),
         // First pass of constant folding, before types are known --
         // may be needed to compute types.
-        new IRPrinter("Before ConstantFolding"),
+        // new IRPrinter("Before ConstantFolding"),
         new ConstantFolding(constantFoldingPolicy),
-        new IRPrinter("After ConstantFolding"),
+        // new IRPrinter("After ConstantFolding"),
         // Validate @name/@deprecated/@noWarn. Should run after constant folding.
         new ValidateStringAnnotations(),
         // Desugars direct parser and control applications
