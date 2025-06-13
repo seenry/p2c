@@ -51,13 +51,13 @@ class CoqGenerator : public Inspector {
  public:
     CoqGenerator() {
         // Add standard Coq imports
-        coqOutput << "Require Import List.\n";
-        coqOutput << "Import ListNotations.\n";
-        coqOutput << "Require Import Strings.String.\n";
         coqOutput << "From MyProject Require Export CrIdentifiers.\n";
-        coqOutput << "From MyProject Require Export CrParser.\n";
         coqOutput << "From MyProject Require Export CrTransformer.\n";
-        coqOutput << "From MyProject Require Export CrScheduler.\n\n";
+        coqOutput << "Require Import Strings.String.\n";
+        coqOutput << "Open Scope string_scope.\n";
+        coqOutput << "Require Import ZArith.\n";
+        coqOutput << "Require Import List.\n";
+        coqOutput << "Import ListNotations.\n\n";
     }
     
     bool preorder(const IR::Type_Header* header) override {
@@ -65,78 +65,90 @@ class CoqGenerator : public Inspector {
         headers.push_back(headerName);
         
         coqOutput << "(* Header definition: " << headerName << " *)\n";
-        coqOutput << "Definition header_" << headerName << " : Header := \"" << headerName << "\".\n\n";
+        coqOutput << "Definition header_" << headerName << " : Header := HeaderCtr \"" << headerName << "\".\n\n";
         
         return true;
     }
     
-    bool preorder(const IR::P4Parser* parser) override {
-        currentParser = parser->name.name.c_str();
-        coqOutput << "(* Parser " << currentParser << " *)\n";
-        return true;
-    }
+    // bool preorder(const IR::P4Parser* parser) override {
+    //     currentParser = parser->name.name.c_str();
+    //     coqOutput << "(* Parser " << currentParser << " *)\n";
+    //     return true;
+    // }
     
-    bool preorder(const IR::ParserState* state) override {
-        std::string stateName = state->name.name.c_str();
-        parserStates.push_back(stateName);
+    // bool preorder(const IR::ParserState* state) override {
+    //     std::string stateName = state->name.name.c_str();
+    //     parserStates.push_back(stateName);
         
-        coqOutput << "(* Parser State: " << stateName << " *)\n";
-        coqOutput << "Definition " << stateName << "_state : ParserState := \"" << stateName << "\".\n";
+    //     coqOutput << "(* Parser State: " << stateName << " *)\n";
+    //     coqOutput << "Definition " << stateName << "_state : ParserState := \"" << stateName << "\".\n";
         
-        // Collect state definition components
-        std::vector<std::string> stateComponents;
+    //     // Collect state definition components
+    //     std::vector<std::string> stateComponents;
         
-        // TODO: Not working. Process statements in the state
-        for (auto stmt : state->components) {
-            if (auto methodCall = stmt->to<IR::MethodCallStatement>()) {
-                if (auto member = methodCall->methodCall->method->to<IR::Member>()) {
-                    if (member->member.name == "extract") {
-                        // Handle extract operation
-                        if (auto args = methodCall->methodCall->arguments) {
-                            if (args->size() > 0) {
-                                auto arg = (*args)[0];
-                                if (auto pathExpr = arg->expression->to<IR::PathExpression>()) {
-                                    std::string headerRef = pathExpr->path->name.name.c_str();
-                                    // Extract the header name from the path (e.g., "hdr.h" -> "h")
-                                    size_t dotPos = headerRef.find('.');
-                                    if (dotPos != std::string::npos) {
-                                        headerRef = headerRef.substr(dotPos + 1);
-                                    }
+    //     // TODO: Not working. Process statements in the state
+    //     for (auto stmt : state->components) {
+    //         if (auto methodCall = stmt->to<IR::MethodCallStatement>()) {
+    //             if (auto member = methodCall->methodCall->method->to<IR::Member>()) {
+    //                 if (member->member.name == "extract") {
+    //                     // Handle extract operation
+    //                     if (auto args = methodCall->methodCall->arguments) {
+    //                         if (args->size() > 0) {
+    //                             auto arg = (*args)[0];
+    //                             if (auto pathExpr = arg->expression->to<IR::PathExpression>()) {
+    //                                 std::string headerRef = pathExpr->path->name.name.c_str();
+    //                                 // Extract the header name from the path (e.g., "hdr.h" -> "h")
+    //                                 size_t dotPos = headerRef.find('.');
+    //                                 if (dotPos != std::string::npos) {
+    //                                     headerRef = headerRef.substr(dotPos + 1);
+    //                                 }
                                     
-                                    coqOutput << "Definition extract_" << headerRef << " : ExtractOp := \n";
-                                    coqOutput << "  ExtractOpConstructor header_" << headerRef << " 0 15. (* extract bits for header *)\n\n";
+    //                                 coqOutput << "Definition extract_" << headerRef << " : ExtractOp := \n";
+    //                                 coqOutput << "  ExtractOpConstructor header_" << headerRef << " 0 15. (* extract bits for header *)\n\n";
                                     
-                                    stateComponents.push_back("extract_" + headerRef);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    //                                 stateComponents.push_back("extract_" + headerRef);
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
         
-        // Handle transitions
-        if (state->selectExpression) {
-            if (auto pathExpr = state->selectExpression->to<IR::PathExpression>()) {
-                std::string targetState = pathExpr->path->name.name.c_str();
-                coqOutput << "Definition " << stateName << "_to_" << targetState << " : Transition := \n";
-                coqOutput << "  Unconditional " << targetState << "_state.\n\n";
+    //     // Handle transitions
+    //     if (state->selectExpression) {
+    //         if (auto pathExpr = state->selectExpression->to<IR::PathExpression>()) {
+    //             std::string targetState = pathExpr->path->name.name.c_str();
+    //             coqOutput << "Definition " << stateName << "_to_" << targetState << " : Transition := \n";
+    //             coqOutput << "  Unconditional " << targetState << "_state.\n\n";
                 
-                // Create parser state definition
-                coqOutput << "Definition " << stateName << "_state_def : ParserStateDef := \n";
-                coqOutput << "  ParserStateDefConstructor " << stateName << "_state ";
-                if (!stateComponents.empty()) {
-                    coqOutput << stateComponents[0] << " ";
-                } else {
-                    coqOutput << "NoOp ";
-                }
-                coqOutput << stateName << "_to_" << targetState << ".\n\n";
-            }
-        }
+    //             // Create parser state definition
+    //             coqOutput << "Definition " << stateName << "_state_def : ParserStateDef := \n";
+    //             coqOutput << "  ParserStateDefConstructor " << stateName << "_state ";
+    //             if (!stateComponents.empty()) {
+    //                 coqOutput << stateComponents[0] << " ";
+    //             } else {
+    //                 coqOutput << "NoOp ";
+    //             }
+    //             coqOutput << stateName << "_to_" << targetState << ".\n\n";
+    //         }
+    //     }
         
-        return true;
+    //     return true;
+    // }
+    // Helper function to extract header name from field path
+std::string extractHeaderName(const std::string& fieldPath) {
+    // Parse "hdr.h.b" to extract "h"
+    size_t firstDot = fieldPath.find('.');
+    if (firstDot != std::string::npos) {
+        size_t secondDot = fieldPath.find('.', firstDot + 1);
+        if (secondDot != std::string::npos) {
+            return fieldPath.substr(0, firstDot);
+        }
     }
-    
+    return "unknown";
+}
+
     bool preorder(const IR::P4Action* action) override {
         std::string actionName = action->name.name.c_str();
         actions.push_back(actionName);
@@ -149,15 +161,18 @@ class CoqGenerator : public Inspector {
                 if (auto member = assign->left->to<IR::Member>()) {
                     // Handle assignment like hdr.h.b = 1
                     std::string fieldPath = member->toString().c_str();
+                    std::string headerName = extractHeaderName(fieldPath);
                     
                     if (auto constant = assign->right->to<IR::Constant>()) {
                         int value = constant->asInt();
                         
                         // Generate Coq assignment operation
-                        coqOutput << "Definition assign_" << actionName << " : BinaryFunction := fun _ _ => " << value << ".\n";
                         coqOutput << "Definition " << actionName << "_op : HdrOp := \n";
-                        coqOutput << "  StatelessOp assign_" << actionName << " header_H (ConstantArg " << value << ").\n\n";
-                    }
+                        coqOutput << "  StatelessOp AddOp (ConstantArg (repr " << value << "%Z))  (ConstantArg (repr 0%Z)) header_" << headerName << ".\n\n";
+                    } //else if (auto add = assign->right->to<IR::Add>()) {
+                        // coqOutput << "Definition " << actionName << "_op : HdrOp := \n";
+                        // coqOutput << "  StatelessOp AddOp (ConstantArg (repr " << add.left << "%Z))  (ConstantArg (repr " << add.right << "%Z)) header_" << headerName << "\n\n";
+                   // }
                 }
             }
         }
@@ -173,7 +188,7 @@ class CoqGenerator : public Inspector {
         
         // Generate match-action rule
         coqOutput << "Definition " << tableName << "_rule : MatchActionRule := \n";
-        coqOutput << "  Seq header_H 0 7 [] ["; // Assuming match on first 8 bits
+        coqOutput << "  Seq header_H (repr 0%Z) (repr 7%Z) [] ["; // Assuming match on first 8 bits
         
         // Add actions
         bool first = true;
@@ -187,85 +202,85 @@ class CoqGenerator : public Inspector {
         return true;
     }
     
-    bool preorder(const IR::P4Control* control) override {
-        std::string controlName = control->name.name.c_str();
+    // bool preorder(const IR::P4Control* control) override {
+    //     std::string controlName = control->name.name.c_str();
         
-        if (controlName == "ingress") {
-            coqOutput << "(* Ingress control transformer *)\n";
-            // Will be completed after processing tables and actions
-        }
+    //     if (controlName == "ingress") {
+    //         coqOutput << "(* Ingress control transformer *)\n";
+    //         // Will be completed after processing tables and actions
+    //     }
         
-        return true;
-    }
+    //     return true;
+    // }
     
     void finalize() {
         // TODO: This is mostly hardcoded stuff that hasn't been added to compiler logic yet.
 
         // Generate parser definition
-        coqOutput << "(* Parser definition *)\n";
-        coqOutput << "Definition p4_parser : Parser := [";
-        bool first = true;
-        for (const auto& state : parserStates) {
-            if (state != "accept" && state != "reject") {
-                if (!first) coqOutput << "; ";
-                coqOutput << state << "_state";
-                first = false;
-            }
-        }
-        coqOutput << "].\n\n";
+        // coqOutput << "(* Parser definition *)\n";
+        // coqOutput << "Definition p4_parser : Parser := [";
+        // bool first = true;
+        // for (const auto& state : parserStates) {
+        //     if (state != "accept" && state != "reject") {
+        //         if (!first) coqOutput << "; ";
+        //         coqOutput << state << "_state";
+        //         first = false;
+        //     }
+        // }
+        // coqOutput << "].\n\n";
         
-        // Generate transformer definition
-        if (!tables.empty()) {
-            coqOutput << "(* Transformer definition for ingress control *)\n";
-            coqOutput << "Definition ingress_transformer : Transformer := [";
-            first = true;
-            for (const auto& table : tables) {
-                if (!first) coqOutput << "; ";
-                coqOutput << table << "_rule";
-                first = false;
-            }
-            coqOutput << "].\n\n";
-        }
+        // // Generate transformer definition
+        // if (!tables.empty()) {
+        //     coqOutput << "(* Transformer definition for ingress control *)\n";
+        //     coqOutput << "Definition ingress_transformer : Transformer := [";
+        //     first = true;
+        //     for (const auto& table : tables) {
+        //         if (!first) coqOutput << "; ";
+        //         coqOutput << table << "_rule";
+        //         first = false;
+        //     }
+        //     coqOutput << "].\n\n";
+        // }
         
-        // Generate modules
-        coqOutput << "(* Module definitions *)\n";
-        coqOutput << "Definition parser_module : Module := \n";
-        coqOutput << "  ParserModule \"p\" p4_parser.\n\n";
+        // // Generate modules
+        // coqOutput << "(* Module definitions *)\n";
+        // coqOutput << "Definition parser_module : Module := \n";
+        // coqOutput << "  ParserModule \"p\" p4_parser.\n\n";
         
-        if (!tables.empty()) {
-            coqOutput << "Definition ingress_module : Module := \n";
-            coqOutput << "  TransformerModule \"ingress\" ingress_transformer.\n\n";
-        }
+        // if (!tables.empty()) {
+        //     coqOutput << "Definition ingress_module : Module := \n";
+        //     coqOutput << "  TransformerModule \"ingress\" ingress_transformer.\n\n";
+        // }
         
-        // Generate scheduler
-        coqOutput << "(* Scheduler definition *)\n";
-        coqOutput << "Definition simple_scheduler_node : PNode := \n";
-        coqOutput << "  (header_H, 0, 15, [], fun x y => x + y). (* Simple scheduling function *)\n\n";
-        coqOutput << "Definition p4_scheduler : Scheduler := \n";
-        coqOutput << "  PNodeCtr simple_scheduler_node.\n\n";
-        coqOutput << "Definition scheduler_module : Module := \n";
-        coqOutput << "  SchedulerModule \"main_scheduler\" p4_scheduler.\n\n";
+        // // Generate scheduler
+        // coqOutput << "(* Scheduler definition *)\n";
+        // coqOutput << "Definition simple_scheduler_node : PNode := \n";
+        // coqOutput << "  (header_H, 0, 15, [], fun x y => x + y). (* Simple scheduling function *)\n\n";
+        // coqOutput << "Definition p4_scheduler : Scheduler := \n";
+        // coqOutput << "  PNodeCtr simple_scheduler_node.\n\n";
+        // coqOutput << "Definition scheduler_module : Module := \n";
+        // coqOutput << "  SchedulerModule \"main_scheduler\" p4_scheduler.\n\n";
         
-        // Generate connections
-        coqOutput << "(* Connection definitions *)\n";
-        coqOutput << "Definition parser_to_ingress : Connection := \n";
-        coqOutput << "  ConnectionDef \"p\" \"ingress\" \"p_to_ingress\".\n\n";
-        coqOutput << "Definition ingress_to_scheduler : Connection := \n";
-        coqOutput << "  ConnectionDef \"ingress\" \"main_scheduler\" \"ingress_to_scheduler\".\n\n";
+        // // Generate connections
+        // coqOutput << "(* Connection definitions *)\n";
+        // coqOutput << "Definition parser_to_ingress : Connection := \n";
+        // coqOutput << "  ConnectionDef \"p\" \"ingress\" \"p_to_ingress\".\n\n";
+        // coqOutput << "Definition ingress_to_scheduler : Connection := \n";
+        // coqOutput << "  ConnectionDef \"ingress\" \"main_scheduler\" \"ingress_to_scheduler\".\n\n";
         
-        // Generate complete program
-        coqOutput << "(* Complete Caracara program *)\n";
-        coqOutput << "Definition p4_caracara_program : CaracaraProgram := \n";
-        coqOutput << "  ([parser_module";
-        if (!tables.empty()) {
-            coqOutput << "; ingress_module";
-        }
-        coqOutput << "; scheduler_module], \n";
-        coqOutput << "   [parser_to_ingress";
-        if (!tables.empty()) {
-            coqOutput << "; ingress_to_scheduler";
-        }
-        coqOutput << "]).\n";
+        // // Generate complete program
+        // coqOutput << "(* Complete Caracara program *)\n";
+        // coqOutput << "Definition p4_caracara_program : CaracaraProgram := \n";
+        // coqOutput << "  ([parser_module";
+        // if (!tables.empty()) {
+        //     coqOutput << "; ingress_module";
+        // }
+        // coqOutput << "; scheduler_module], \n";
+        // coqOutput << "   [parser_to_ingress";
+        // if (!tables.empty()) {
+        //     coqOutput << "; ingress_to_scheduler";
+        // }
+        // coqOutput << "]).\n";
     }
     
     std::string getCoqCode() const {
@@ -284,32 +299,32 @@ class CoqVisitor : public Inspector {
         delete generator;
     }
     
-    bool preorder(const IR::P4Parser* parser) override {
-        std::cout << "I am visiting parser " << parser->name.name << std::endl;
-        return true;
-    }
+    // bool preorder(const IR::P4Parser* parser) override {
+    //     std::cout << "I am visiting parser " << parser->name.name << std::endl;
+    //     return true;
+    // }
     
-    bool preorder(const IR::ParserState* state) override {
-        std::cout << "I am visiting parser state " << state->name.name << ":" << std::endl;
-        // Print simplified state info similar to original ParserVisitor
-        std::cout << "state " << state->name.name << " {" << std::endl;
-        for (auto stmt : state->components) {
-            if (auto methodCall = stmt->to<IR::MethodCallStatement>()) {
-                if (auto member = methodCall->methodCall->method->to<IR::Member>()) {
-                    if (member->member.name == "extract") {
-                        std::cout << "  extract operation;" << std::endl;
-                    }
-                }
-            }
-        }
-        if (state->selectExpression) {
-            if (auto pathExpr = state->selectExpression->to<IR::PathExpression>()) {
-                std::cout << "  " << pathExpr->path->name.name << ";" << std::endl;
-            }
-        }
-        std::cout << " }" << std::endl;
-        return true;
-    }
+    // bool preorder(const IR::ParserState* state) override {
+    //     std::cout << "I am visiting parser state " << state->name.name << ":" << std::endl;
+    //     // Print simplified state info similar to original ParserVisitor
+    //     std::cout << "state " << state->name.name << " {" << std::endl;
+    //     for (auto stmt : state->components) {
+    //         if (auto methodCall = stmt->to<IR::MethodCallStatement>()) {
+    //             if (auto member = methodCall->methodCall->method->to<IR::Member>()) {
+    //                 if (member->member.name == "extract") {
+    //                     std::cout << "  extract operation;" << std::endl;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     if (state->selectExpression) {
+    //         if (auto pathExpr = state->selectExpression->to<IR::PathExpression>()) {
+    //             std::cout << "  " << pathExpr->path->name.name << ";" << std::endl;
+    //         }
+    //     }
+    //     std::cout << " }" << std::endl;
+    //     return true;
+    // }
     
     bool preorder(const IR::P4Program* program) override {
         // First, do the parser debugging output
