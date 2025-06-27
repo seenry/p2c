@@ -65,8 +65,7 @@ class CoqGenerator : public Inspector {
         headers.push_back(headerName);
 
         coqOutput << "(* Header definition: " << headerName << " *)\n";
-        coqOutput << "Definition header_" << headerName << " : Header := HeaderCtr \"" << headerName
-                  << "\".\n\n";
+        coqOutput << "Definition header_" << headerName << " : Header := HeaderCtr 1%positive.\n\n";
 
         return true;
     }
@@ -179,7 +178,7 @@ class CoqGenerator : public Inspector {
 
         // Generate match-action rule
         coqOutput << "Definition " << tableName << "_rule : MatchActionRule := \n";
-        coqOutput << "  Seq header_H (repr 0%Z) (repr 7%Z) [] [";  // Assuming match on first 8 bits
+        coqOutput << "  Seq (SeqCtr [(header_" << headers.front() << ", repr 0%Z)] [";  // Assuming match on first 8 bits
 
         // Add actions
         bool first = true;
@@ -188,7 +187,7 @@ class CoqGenerator : public Inspector {
             coqOutput << action << "_op";
             first = false;
         }
-        coqOutput << "]. (* Match and execute actions *)\n\n";
+        coqOutput << "]). (* Match and execute actions *)\n\n";
 
         return true;
     }
