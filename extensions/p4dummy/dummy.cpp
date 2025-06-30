@@ -51,6 +51,12 @@ class CoqGenerator : public Inspector {
  public:
     CoqGenerator() {
         // Add standard Coq imports
+        coqOutput << "From MyProject Require Import SmtExpr.\n";
+        coqOutput << "From MyProject Require Import SmtQuery.\n";
+        coqOutput << "From MyProject Require Import CrTransformer.\n";
+        coqOutput << "From MyProject Require Import CrSymbolicSemantics.\n";
+        coqOutput << "From MyProject Require Import CrConcreteSemantics.\n";
+        coqOutput << "From MyProject Require Import ConcreteToSymbolicLemmas.\n";
         coqOutput << "From MyProject Require Export CrIdentifiers.\n";
         coqOutput << "From MyProject Require Export CrTransformer.\n";
         coqOutput << "Require Import Strings.String.\n";
@@ -176,9 +182,9 @@ class CoqGenerator : public Inspector {
 
         coqOutput << "(* Table: " << tableName << " *)\n";
 
-        // Generate match-action rule
-        coqOutput << "Definition " << tableName << "_rule : MatchActionRule := \n";
-        coqOutput << "  Seq (SeqCtr [(header_" << headers.front() << ", repr 0%Z)] [";  // Assuming match on first 8 bits
+        // Generate Seq Rule
+        coqOutput << "Definition " << tableName << "_seq_rule : SeqRule := \n";
+        coqOutput << "  SeqCtr [(header_" << headers.front() << ", repr 0%Z)] [";
 
         // Add actions
         bool first = true;
@@ -187,7 +193,11 @@ class CoqGenerator : public Inspector {
             coqOutput << action << "_op";
             first = false;
         }
-        coqOutput << "]). (* Match and execute actions *)\n\n";
+        coqOutput << "]. (* Match and execute actions *)\n\n";
+
+        // Generate match-action rule
+        coqOutput << "Definition " << tableName << "_rule : MatchActionRule := \n";
+        coqOutput << "  Seq " << tableName << "_seq_rule.\n\n";  // Assuming match on first 8 bits
 
         return true;
     }
@@ -205,6 +215,28 @@ class CoqGenerator : public Inspector {
 
     void finalize() {
         // TODO: This is mostly hardcoded stuff that hasn't been added to compiler logic yet.
+
+        coqOutput << "(* THE SIMPLEST POSSIBLE ProgramState SmtArithExpr *)\n";
+        coqOutput << "Definition simplest_state : ProgramState SmtArithExpr := {|\n";
+        coqOutput << "ctrl_plane_map := fun _ => SmtConst (repr 0%Z);\n";
+        coqOutput << "header_map := fun _ => SmtConst (repr 0%Z);\n";
+        coqOutput << "state_var_map := fun _ => SmtConst (repr 0%Z)\n";
+        coqOutput << "|}.\n\n";
+
+        coqOutput << "Definition headers_to_check : list Header := [header_" << headers.front()
+                  << "].\n";
+        coqOutput << "Definition state_vars_to_check : list StateVar := [].\n";
+
+        coqOutput << "(* Construct the equivalence checker instance *)\n";
+        coqOutput << "Definition my_equivalence_check : option SmtValuation :=\n";
+        coqOutput << "  equivalence_checker\n";
+        coqOutput << "      simplest_state       (* Starting symbolic state *)\n";
+        coqOutput << "      " <<tables.front() << "_seq_rule          (* First rule *)\n";
+        coqOutput << "      " <<tables.front() << "_seq_rule          (* Second rule (same) *)\n";
+        coqOutput << "      headers_to_check             \n";
+        coqOutput << "      state_vars_to_check.         \n";
+
+        coqOutput << "Eval compute in my_equivalence_check.\n";
 
         // Generate parser definition
         // coqOutput << "(* Parser definition *)\n";
