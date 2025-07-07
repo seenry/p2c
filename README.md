@@ -1,66 +1,36 @@
-# IR Analysis
+## Rocq Compiler
+This P4C extension converts certain P4 programs to ROCQ code.
 
-## Printer
-```cpp
-#pragma once
-#include "ir/ir.h"
-#include "ir/visitor.h"
-
-namespace P4 {
-
-class IRPrinter : public Inspector {
-public:
-    explicit IRPrinter(const std::string& label) : label(label) {}
-    
-    bool preorder(const IR::Node* node) override {
-        std::cout << "\n=== IR Dump: " << label << " ===\n";
-        std::cout << node << std::endl;
-        return false;
-    }
-    
-private:
-    std::string label;
-};
-
-}
+## Limitations
+#### Imports
+File imports are done statically `coqOutput << "From MyProject Require Import SmtExpr.\n";`
+#### Headers
+One header can be used and will be entitled `header_{name}` where name is the P4 name.
+#### Actions
+Unlimited actions may be added, but they are currently limited to constant assignment through addition to zero. They will be named `{name}_op` where name is the p4 name.
+#### Tables
+For all of the tables you will get the following:
 ```
-## Additional Modifications
-* `frontends/CMakeLists.txt`: included `pr/IRPrinter.h` @ line 90
-* `frontends/p4/frontend.cpp`: added `#include "IRPrinter.h"` @ line 28
-*  `frontends/p4/frontend.cpp`: added `new IRPrinter("Before ConstantFolding"),` @ line 174, 176
-## Getting started
+(* Table: the_table_0 *)
+Definition the_table_0_seq_rule : SeqRule := 
+  SeqCtr [(header_H, repr 0%Z)] [MyAction1_op].
 
-### Installing P4C from source
-1.  Clone the repository. It includes submodules, so be sure to use
-    `--recursive` to pull them in:
-    ```
-    git clone --recursive https://github.com/p4lang/p4c.git
-    ```
-    If you forgot `--recursive`, you can update the submodules at any time using:
-    ```
-    git submodule update --init --recursive
-    ```
-
-2.  Most dependencies can be installed using `apt-get install`:
-    ```bash
-    sudo apt-get install cmake g++ git automake libtool libgc-dev bison flex \
-    libfl-dev libboost-dev libboost-iostreams-dev \
-    libboost-graph-dev llvm pkg-config python3 python3-pip \
-    tcpdump
-
-    pip3 install --user -r requirements.txt
-    ```
-
-3.  Build. Building should also take place in a subdirectory named `build`.
-    ```
-    mkdir build
-    cd build
-    cmake .. <optional arguments>
-    make -j4
-    make -j4 check
-    ```
-
-4.  Compile Program using:
-    ```
-    ./build/p4c --target bmv2 --arch v1model ~/rocq-notes/cir/coqsrc/simpl.p4 > ~/output
-    ```
+Definition the_table_0_rule : MatchActionRule := 
+  Seq the_table_0_seq_rule.
+```
+- the_table_0: P4's name for your table
+- header_H: the name of the program's header
+- \[MyAction1_op\]: a list of actions to be applied to the table
+#### State
+Program state is statically generated:
+```
+(* THE SIMPLEST POSSIBLE ProgramState SmtArithExpr *)
+(* We have been operating on stateless only so far so this is a dummy instance to satisfy the compiler.*)
+Definition simplest_state : ProgramState SmtArithExpr := {|
+ctrl_plane_map := fun _ => SmtConst (repr 0%Z);
+header_map := fun _ => SmtConst (repr 0%Z);
+state_var_map := fun _ => SmtConst (repr 0%Z)
+|}.
+```
+#### Equivalence checker
+The equivalence checker checks the first defined rule against itself.
