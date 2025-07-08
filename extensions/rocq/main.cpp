@@ -133,27 +133,27 @@ class CoqGenerator : public Inspector {
     void finalize() {
         // TODO: This is mostly hardcoded stuff that hasn't been added to compiler logic yet.
 
-        coqOutput << "(* THE SIMPLEST POSSIBLE ProgramState SmtArithExpr *)\n";
-        coqOutput << "Definition simplest_state : ProgramState SmtArithExpr := {|\n";
-        coqOutput << "ctrl_plane_map := fun _ => SmtConst (repr 0%Z);\n";
-        coqOutput << "header_map := fun _ => SmtConst (repr 0%Z);\n";
-        coqOutput << "state_var_map := fun _ => SmtConst (repr 0%Z)\n";
-        coqOutput << "|}.\n\n";
+        // coqOutput << "(* THE SIMPLEST POSSIBLE ProgramState SmtArithExpr *)\n";
+        // coqOutput << "Definition simplest_state : ProgramState SmtArithExpr := {|\n";
+        // coqOutput << "ctrl_plane_map := fun _ => SmtConst (repr 0%Z);\n";
+        // coqOutput << "header_map := fun _ => SmtConst (repr 0%Z);\n";
+        // coqOutput << "state_var_map := fun _ => SmtConst (repr 0%Z)\n";
+        // coqOutput << "|}.\n\n";
 
-        coqOutput << "Definition headers_to_check : list Header := [header_" << headers.front()
-                  << "].\n";
-        coqOutput << "Definition state_vars_to_check : list StateVar := [].\n";
+        // coqOutput << "Definition headers_to_check : list Header := [header_" << headers.front()
+        //           << "].\n";
+        // coqOutput << "Definition state_vars_to_check : list StateVar := [].\n";
 
-        coqOutput << "(* Construct the equivalence checker instance *)\n";
-        coqOutput << "Definition my_equivalence_check : option SmtValuation :=\n";
-        coqOutput << "  equivalence_checker\n";
-        coqOutput << "      simplest_state       (* Starting symbolic state *)\n";
-        coqOutput << "      " <<tables.front() << "_seq_rule          (* First rule *)\n";
-        coqOutput << "      " <<tables.front() << "_seq_rule          (* Second rule (same) *)\n";
-        coqOutput << "      headers_to_check             \n";
-        coqOutput << "      state_vars_to_check.         \n";
+        // coqOutput << "(* Construct the equivalence checker instance *)\n";
+        // coqOutput << "Definition my_equivalence_check : option SmtValuation :=\n";
+        // coqOutput << "  equivalence_checker\n";
+        // coqOutput << "      simplest_state       (* Starting symbolic state *)\n";
+        // coqOutput << "      " <<tables.front() << "_seq_rule          (* First rule *)\n";
+        // coqOutput << "      " <<tables.front() << "_seq_rule          (* Second rule (same) *)\n";
+        // coqOutput << "      headers_to_check             \n";
+        // coqOutput << "      state_vars_to_check.         \n";
 
-        coqOutput << "Eval compute in my_equivalence_check.\n";
+        // coqOutput << "Eval compute in my_equivalence_check.\n";
     }
 
     std::string getCoqCode() const { return coqOutput.str(); }
