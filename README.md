@@ -34,3 +34,8 @@ state_var_map := fun _ => SmtConst (repr 0%Z)
 ```
 #### Equivalence checker
 The equivalence checker checks the first defined rule against itself.
+
+## Usage (not accurate for first time)
+cd build
+cmake -DCMAKE_BUILD_TYPE=Debug ..
+make -j8
