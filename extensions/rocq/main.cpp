@@ -92,7 +92,11 @@ class CoqVisitor : public Inspector {
                     coqOutput << "  StatelessOp AddOp (ConstantArg (repr " << value
                               << "%Z))  (ConstantArg (repr 0%Z)) header_" << headers.front()
                               << ".\n\n";
+                } else {
+                    error("Assignment must be constant.");
                 }
+            } else {
+                error("Only assignment is supported.");
             }
         }
 
@@ -168,5 +172,9 @@ int main(int argc, char *const argv[]) {
         std::cout << "\nCoq code written to output.v\n";
     }
 
-    return P4::errorCount() > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    if(P4::errorCount() > 0){
+       P4::error("P4 error count > 0");
+       return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
