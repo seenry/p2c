@@ -1,26 +1,26 @@
-#ifndef _TOZ3_OPTIONS_H_
-#define _TOZ3_OPTIONS_H_
+#ifndef _ROCQS_OPTIONS_H_
+#define _ROCQS_OPTIONS_H_
 
 #include "frontends/common/options.h"
 #include "frontends/common/parser_options.h"
 
-namespace P4::P4Dummy {
+namespace P4::Rocq {
 
-class DummyOptions : public CompilerOptions {
+class RocqOptions : public P4::CompilerOptions {
  public:
-    virtual ~DummyOptions() = default;
+    virtual ~RocqOptions() = default;
 
-    DummyOptions();
-    DummyOptions(const DummyOptions &) = default;
-    DummyOptions(DummyOptions &&) = delete;
-    DummyOptions &operator=(const DummyOptions &) = default;
-    DummyOptions &operator=(DummyOptions &&) = delete;
+    RocqOptions();
+    RocqOptions(const RocqOptions &) = default;
+    RocqOptions(RocqOptions &&) = delete;
+    RocqOptions &operator=(const RocqOptions &) = default;
+    RocqOptions &operator=(RocqOptions &&) = delete;
 
     bool useFixed = false;
 };
 
-using P4DummyContext = P4CContextWithOptions<DummyOptions>;
+using RocqContext = P4::P4CContextWithOptions<RocqOptions>;
 
-}  // namespace P4::P4Dummy
+}  // namespace P4::Rocq
 
-#endif /* _TOZ3_OPTIONS_H_ */
+#endif /* _ROCQS_OPTIONS_H_ */

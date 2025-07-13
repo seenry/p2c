@@ -1,8 +1,8 @@
 #include "options.h"
 
-namespace P4::P4Dummy {
+namespace P4::Rocq {
 
-DummyOptions::DummyOptions() {
+RocqOptions::RocqOptions() : P4::CompilerOptions() {
     registerOption(
         "--use-fixed", nullptr,
         [this](const char *) {
@@ -11,5 +11,4 @@ DummyOptions::DummyOptions() {
         },
         "Instead of parsing a real P4 program manipulate and parse a dummy program.");
 }
-
-}  // namespace P4::P4Dummy
+}
