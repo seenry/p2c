@@ -40,12 +40,11 @@ class MidEnd : public PassManager {
 
 class CoqVisitor : public Inspector {
     std::ostringstream coqOutput;
-    std::vector<std::string> headers;
-    std::vector<std::string> parserStates;
+    // Map P4 field names (e.g., "a") to Coq identifiers (e.g., "h_a")
+    std::map<std::string, std::string> headerFieldToCoqIdent;
     std::vector<std::string> actions;
     std::vector<std::string> tables;
-    std::string currentParser;
-    std::map<std::string, std::vector<std::string>> parserStateDefs;
+    int header_uid = 1; // For generating unique HeaderCtr IDs
 
  public:
     CoqVisitor() {
@@ -68,60 +67,114 @@ class CoqVisitor : public Inspector {
     ~CoqVisitor() {}
 
     bool preorder(const IR::Type_Header *header) override {
-        std::string headerName = header->name.name.c_str();
-        headers.push_back(headerName);
+        coqOutput << "(* 1. Define Identifiers for Header Fields from P4 header: "
+                  << header->name.name.c_str() << " *)\n";
 
-        coqOutput << "(* Header definition: " << headerName << " *)\n";
-        coqOutput << "Definition header_" << headerName << " : Header := HeaderCtr 1%positive.\n\n";
-
+        for (auto field : header->fields) {
+            std::string fieldName = field->name.name.c_str();
+            // Create a Coq identifier, e.g., "h_a" from "a"
+            std::string coqIdent = "h_" + fieldName;
+            
+            // Generate the Coq Definition for the header field
+            coqOutput << "Definition " << coqIdent << " : Header := HeaderCtr " 
+                      << std::to_string(header_uid++) << "%positive.\n";
+            
+            // Store the mapping for later use in actions
+            headerFieldToCoqIdent[fieldName] = coqIdent;
+        }
+        coqOutput << "\n";
         return true;
+    }
+    
+    // Helper method to resolve a P4 header field expression (like hdr.h.a)
+    // to its corresponding Coq identifier (like h_a).
+    std::string resolveHeaderField(const IR::Expression *expr) {
+        if (auto member = expr->to<IR::Member>()) {
+            std::string fieldName = member->member.name.c_str();
+            if (headerFieldToCoqIdent.count(fieldName)) {
+                return headerFieldToCoqIdent.at(fieldName);
+            }
+        }
+        error("Could not resolve header field: %s", expr->toString().c_str());
+        return "(* unresolved_header *)";
+    }
+    
+    // Helper method to process an expression and get its Rocq FunctionArgument representation.
+    std::string processExpressionAsArg(const IR::Expression *expr) {
+        if (auto member = expr->to<IR::Member>()) {
+            // header field: hdr.h.a
+            std::string coqIdent = resolveHeaderField(expr);
+            return "(HeaderArg " + coqIdent + ")";
+        } else if (auto constant = expr->to<IR::Constant>()) {
+            // Constant value
+            return "(ConstantArg (repr " + std::to_string(constant->asInt()) + "%Z))";
+        }
+        // Else fail
+        error("Unsupported expression type for action argument: %s", expr->toString().c_str());
+        return "(ConstantArg (repr 0%Z))";
+    }
+
+    void processAssignment(const IR::AssignmentStatement *assign, const std::string &actionName) {
+        // Resolve the left-hand side (the target of the assignment)
+        std::string targetIdent = resolveHeaderField(assign->left);
+
+        coqOutput << "Definition " << actionName << "_op : HdrOp :=\n";
+        
+        // Check if the right-hand side is a header field access (e.g., hdr.h.a)
+        if (assign->right->is<IR::Member>()) {
+            std::string sourceArg = processExpressionAsArg(assign->right);
+            // Model the assignment `b = a` as `b = a + 0` in Rocq
+            coqOutput << "  StatelessOp AddOp " << sourceArg 
+                      << " (ConstantArg (repr 0%Z)) " << targetIdent << ".\n\n";
+        } else {
+            // Handle other types of assignments if necessary (e.g., constants)
+            std::string sourceArg = processExpressionAsArg(assign->right);
+            coqOutput << "  StatelessOp AddOp " << sourceArg 
+                      << " (ConstantArg (repr 0%Z)) " << targetIdent << ".\n\n";
+        }
     }
 
     bool preorder(const IR::P4Action *action) override {
         std::string actionName = action->name.name.c_str();
         actions.push_back(actionName);
 
-        coqOutput << "(* Action: " << actionName << " *)\n";
+        coqOutput << "(* 2. Define the Action (Header Operation): " << actionName << " *)\n";
 
         for (auto stmt : action->body->components) {
             if (auto assign = stmt->to<IR::AssignmentStatement>()) {
-                if (auto constant = assign->right->to<IR::Constant>()) {
-                    int value = constant->asInt();
-
-                    coqOutput << "Definition " << actionName << "_op : HdrOp := \n";
-                    coqOutput << "  StatelessOp AddOp (ConstantArg (repr " << value
-                              << "%Z))  (ConstantArg (repr 0%Z)) header_" << headers.front()
-                              << ".\n\n";
-                } else {
-                    error("Assignment must be constant.");
-                }
+                processAssignment(assign, actionName);
             } else {
-                error("Only assignment is supported.");
+                error("Unsupported statement type in action %s: %s", 
+                      actionName.c_str(), stmt->toString().c_str());
             }
         }
-
         return true;
     }
 
     bool preorder(const IR::P4Table *table) override {
         std::string tableName = table->name.name.c_str();
         tables.push_back(tableName);
-
-        coqOutput << "(* Table: " << tableName << " *)\n";
-
-        coqOutput << "Definition " << tableName << "_seq_rule : SeqRule := \n";
-        coqOutput << "  SeqCtr [(header_" << headers.front() << ", repr 0%Z)] [";
-
-        bool first = true;
-        for (const auto &action : actions) {
-            if (!first) coqOutput << "; ";
-            coqOutput << action << "_op";
-            first = false;
+        
+        // Find the default action to determine which op to use
+        auto defaultActionProp = table->properties->getProperty("default_action");
+        if (defaultActionProp == nullptr) {
+            error("Table %s has no default_action, cannot generate rule.", tableName.c_str());
+            return true;
         }
-        coqOutput << "]. \n\n";
 
-        coqOutput << "Definition " << tableName << "_rule : MatchActionRule := \n";
-        coqOutput << "  Seq " << tableName << "_seq_rule.\n\n";
+        auto actionExpr = defaultActionProp->value->to<IR::ExpressionValue>()->expression;
+        auto mce = actionExpr->to<IR::MethodCallExpression>();
+        auto actionName = mce->method->to<IR::PathExpression>()->path->name.name;
+
+        coqOutput << "(* 3. Define the Match-Action Rule for table: " << tableName << " *)\n";
+        // coqOutput << "(* This rule is sequential and has an empty match pattern because\n";
+        // coqOutput << "   it's derived from the table's default_action. *)\n";
+        coqOutput << "Definition " << tableName << "_rule : SeqRule :=\n";
+        
+        // Use an empty match pattern `[]` for default actions
+        coqOutput << "  SeqCtr\n";
+        coqOutput << "    [] (* Empty MatchPattern -> always matches *)\n";
+        coqOutput << "    [" << actionName << "_op].\n\n";
 
         return true;
     }
@@ -138,43 +191,32 @@ int main(int argc, char *const argv[]) {
     P4::AutoCompileContext autoRocqContext(new P4::Rocq::RocqContext);
     auto &options = P4::Rocq::RocqContext::get().options();
 
-    if (options.process(argc, argv) == nullptr) {
-        return EXIT_FAILURE;
-    }
+    if (options.process(argc, argv) == nullptr) return EXIT_FAILURE;
+    if (P4::errorCount() > 0) return EXIT_FAILURE;
 
-    if (P4::errorCount() > 0) {
-        return EXIT_FAILURE;
-    }
-
-    const P4::IR::P4Program *program = nullptr;
     options.setInputFile();
-    program = P4::parseP4File(options);
+    const P4::IR::P4Program *program = P4::parseP4File(options);
 
-    if (program == nullptr && P4::errorCount() != 0) {
-        return EXIT_FAILURE;
-    }
+    if (program == nullptr || P4::errorCount() > 0) return EXIT_FAILURE;
 
     P4::FrontEnd fe;
     program = fe.run(options, program);
+    if (program == nullptr) return EXIT_FAILURE;
 
     program = program->apply(P4::Rocq::MidEnd());
 
     P4::Rocq::CoqVisitor coqVisitor;
     program->apply(coqVisitor);
+    coqVisitor.finalize(); // Call finalize to generate the transformer definition
 
     std::string generatedCode = coqVisitor.getCoqCode();
-
     std::cout << generatedCode << std::endl;
+
     std::ofstream coqFile("output.v");
     if (coqFile.is_open()) {
         coqFile << generatedCode;
         coqFile.close();
-        std::cout << "\nCoq code written to output.v\n";
     }
 
-    if(P4::errorCount() > 0){
-       P4::error("P4 error count > 0");
-       return EXIT_FAILURE;
-    }
-    return EXIT_SUCCESS;
+    return P4::errorCount() > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

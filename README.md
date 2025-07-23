@@ -39,3 +39,18 @@ The equivalence checker checks the first defined rule against itself.
 cd build
 cmake -DCMAKE_BUILD_TYPE=Debug ..
 make -j4
+
+
+# TODO:
+Support assignment to variables or headers instead of constants
+Go from there and broaden the scope of things. Make sure anythign that is unsupported raises an exception. 
+few weeks from now. ebpf pointer modeling compcert wrote a paper on this (but a little too involved).
+P237 Porgram logics for certified compilers has a reference to something simpler (a more basic starting point). References in the back also have some stuff 30,26. Proving pointer programs in hoare logic. Joe suggested instead of a map index into a map by integer adress (but arithmetic is not allowed). Something like that for ebpf. 
+Other issue ebpf interacting with the OS
+uninterpretive functions
+
+Look into extraction process. Software foundations has something on this 
+Mlton whole program optimizing compiler. Could run ocaml through this. kcaml
+
+1. expand the P4C compiler 
+2.  is look at extraction 
