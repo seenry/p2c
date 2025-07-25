@@ -44,7 +44,7 @@ class CoqVisitor : public Inspector {
     std::map<std::string, std::string> headerFieldToCoqIdent;
     std::vector<std::string> actions;
     std::vector<std::string> tables;
-    int header_uid = 1; // For generating unique HeaderCtr IDs
+    int header_uid = 1;  // For generating unique HeaderCtr IDs
 
  public:
     CoqVisitor() {
@@ -52,11 +52,11 @@ class CoqVisitor : public Inspector {
         coqOutput << "From MyProject Require Import SmtExpr.\n";
         coqOutput << "From MyProject Require Import SmtQuery.\n";
         coqOutput << "From MyProject Require Import CrTransformer.\n";
-        coqOutput << "From MyProject Require Import CrSymbolicSemantics.\n";
-        coqOutput << "From MyProject Require Import CrConcreteSemantics.\n";
-        coqOutput << "From MyProject Require Import ConcreteToSymbolicLemmas.\n";
-        coqOutput << "From MyProject Require Export CrIdentifiers.\n";
-        coqOutput << "From MyProject Require Export CrTransformer.\n";
+        // coqOutput << "(* From MyProject Require Import CrSymbolicSemantics.*)\n";
+        // coqOutput << "(* From MyProject Require Import CrConcreteSemantics.*)\n";
+        // coqOutput << "From MyProject Require Import ConcreteToSymbolicLemmas.\n";
+        // coqOutput << "From MyProject Require Export CrIdentifiers.\n";
+        // coqOutput << "From MyProject Require Export CrTransformer.\n";
         coqOutput << "Require Import Strings.String.\n";
         coqOutput << "Open Scope string_scope.\n";
         coqOutput << "Require Import ZArith.\n";
@@ -74,18 +74,18 @@ class CoqVisitor : public Inspector {
             std::string fieldName = field->name.name.c_str();
             // Create a Coq identifier, e.g., "h_a" from "a"
             std::string coqIdent = "h_" + fieldName;
-            
+
             // Generate the Coq Definition for the header field
-            coqOutput << "Definition " << coqIdent << " : Header := HeaderCtr " 
+            coqOutput << "Definition " << coqIdent << " : Header := HeaderCtr "
                       << std::to_string(header_uid++) << "%positive.\n";
-            
+
             // Store the mapping for later use in actions
             headerFieldToCoqIdent[fieldName] = coqIdent;
         }
         coqOutput << "\n";
         return true;
     }
-    
+
     // Helper method to resolve a P4 header field expression (like hdr.h.a)
     // to its corresponding Coq identifier (like h_a).
     std::string resolveHeaderField(const IR::Expression *expr) {
@@ -98,7 +98,7 @@ class CoqVisitor : public Inspector {
         error("Could not resolve header field: %s", expr->toString().c_str());
         return "(* unresolved_header *)";
     }
-    
+
     // Helper method to process an expression and get its Rocq FunctionArgument representation.
     std::string processExpressionAsArg(const IR::Expression *expr) {
         if (auto member = expr->to<IR::Member>()) {
@@ -119,18 +119,18 @@ class CoqVisitor : public Inspector {
         std::string targetIdent = resolveHeaderField(assign->left);
 
         coqOutput << "Definition " << actionName << "_op : HdrOp :=\n";
-        
+
         // Check if the right-hand side is a header field access (e.g., hdr.h.a)
         if (assign->right->is<IR::Member>()) {
             std::string sourceArg = processExpressionAsArg(assign->right);
             // Model the assignment `b = a` as `b = a + 0` in Rocq
-            coqOutput << "  StatelessOp AddOp " << sourceArg 
-                      << " (ConstantArg (repr 0%Z)) " << targetIdent << ".\n\n";
+            coqOutput << "  StatelessOp AddOp " << sourceArg << " (ConstantArg (repr 0%Z)) "
+                      << targetIdent << ".\n\n";
         } else {
             // Handle other types of assignments if necessary (e.g., constants)
             std::string sourceArg = processExpressionAsArg(assign->right);
-            coqOutput << "  StatelessOp AddOp " << sourceArg 
-                      << " (ConstantArg (repr 0%Z)) " << targetIdent << ".\n\n";
+            coqOutput << "  StatelessOp AddOp " << sourceArg << " (ConstantArg (repr 0%Z)) "
+                      << targetIdent << ".\n\n";
         }
     }
 
@@ -144,8 +144,8 @@ class CoqVisitor : public Inspector {
             if (auto assign = stmt->to<IR::AssignmentStatement>()) {
                 processAssignment(assign, actionName);
             } else {
-                error("Unsupported statement type in action %s: %s", 
-                      actionName.c_str(), stmt->toString().c_str());
+                error("Unsupported statement type in action %s: %s", actionName.c_str(),
+                      stmt->toString().c_str());
             }
         }
         return true;
@@ -154,7 +154,7 @@ class CoqVisitor : public Inspector {
     bool preorder(const IR::P4Table *table) override {
         std::string tableName = table->name.name.c_str();
         tables.push_back(tableName);
-        
+
         // Find the default action to determine which op to use
         auto defaultActionProp = table->properties->getProperty("default_action");
         if (defaultActionProp == nullptr) {
@@ -169,18 +169,20 @@ class CoqVisitor : public Inspector {
         coqOutput << "(* 3. Define the Match-Action Rule for table: " << tableName << " *)\n";
         // coqOutput << "(* This rule is sequential and has an empty match pattern because\n";
         // coqOutput << "   it's derived from the table's default_action. *)\n";
-        coqOutput << "Definition " << tableName << "_rule : SeqRule :=\n";
-        
+        coqOutput << "Definition " << tableName << "_seq_rule : SeqRule :=\n";
+
         // Use an empty match pattern `[]` for default actions
         coqOutput << "  SeqCtr\n";
         coqOutput << "    [] (* Empty MatchPattern -> always matches *)\n";
         coqOutput << "    [" << actionName << "_op].\n\n";
 
+        coqOutput << "Definition " << tableName << "_rule : MatchActionRule :=\n";
+        coqOutput << "  Seq " << tableName << "_seq_rule.\n";
+
         return true;
     }
 
-    void finalize() {
-    }
+    void finalize() {}
 
     std::string getCoqCode() const { return coqOutput.str(); }
 };
@@ -207,7 +209,7 @@ int main(int argc, char *const argv[]) {
 
     P4::Rocq::CoqVisitor coqVisitor;
     program->apply(coqVisitor);
-    coqVisitor.finalize(); // Call finalize to generate the transformer definition
+    coqVisitor.finalize();  // Call finalize to generate the transformer definition
 
     std::string generatedCode = coqVisitor.getCoqCode();
     std::cout << generatedCode << std::endl;
