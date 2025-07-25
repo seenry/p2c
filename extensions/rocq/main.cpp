@@ -101,7 +101,7 @@ class CoqVisitor : public Inspector {
 
     // Helper method to process an expression and get its Rocq FunctionArgument representation.
     std::string processExpressionAsArg(const IR::Expression *expr) {
-        if (auto member = expr->to<IR::Member>()) {
+        if (expr->to<IR::Member>()) {
             // header field: hdr.h.a
             std::string coqIdent = resolveHeaderField(expr);
             return "(HeaderArg " + coqIdent + ")";
@@ -114,23 +114,44 @@ class CoqVisitor : public Inspector {
         return "(ConstantArg (repr 0%Z))";
     }
 
+    // Converts P4 operation types to a string representing the COQ operation type
+    std::string p4OpToCoqOp(const IR::Operation_Binary *binOp) {
+        if (binOp->is<IR::Add>()) return "AddOp";
+        if (binOp->is<IR::Sub>()) return "SubOp";
+        if (binOp->is<IR::BAnd>()) return "AndOp";
+        if (binOp->is<IR::BOr>()) return "OrOp";
+        if (binOp->is<IR::BXor>()) return "XorOp";
+        if (binOp->is<IR::Mul>()) return "MulOp";
+        if (binOp->is<IR::Div>()) return "DivOp";
+        if (binOp->is<IR::Mod>()) return "ModOp";
+
+        error("Unsupported binary operation: %s", binOp->toString());
+        return "(* unsupported_op *)";
+    }
+
     void processAssignment(const IR::AssignmentStatement *assign, const std::string &actionName) {
         // Resolve the left-hand side (the target of the assignment)
         std::string targetIdent = resolveHeaderField(assign->left);
 
         coqOutput << "Definition " << actionName << "_op : HdrOp :=\n";
 
-        // Check if the right-hand side is a header field access (e.g., hdr.h.a)
-        if (assign->right->is<IR::Member>()) {
+        // Check if the right-hand side is a binary operation (e.g., a + b). -= is expanded prior to this pass
+        if (auto binOp = assign->right->to<IR::Operation_Binary>()) {
+            std::string coqOp = p4OpToCoqOp(binOp);
+            std::string leftArg = processExpressionAsArg(binOp->left);
+            std::string rightArg = processExpressionAsArg(binOp->right);
+
+            coqOutput << "  StatelessOp " << coqOp << " " << leftArg << " " << rightArg << " "
+                      << targetIdent << ".\n\n";
+
+        } else if (assign->right->is<IR::Member>() || assign->right->is<IR::Constant>()) {
+            // Handle simple assignments (e.g., b = a; or b = 1;) by modeling them as `b = a + 0`
             std::string sourceArg = processExpressionAsArg(assign->right);
-            // Model the assignment `b = a` as `b = a + 0` in Rocq
             coqOutput << "  StatelessOp AddOp " << sourceArg << " (ConstantArg (repr 0%Z)) "
                       << targetIdent << ".\n\n";
         } else {
-            // Handle other types of assignments if necessary (e.g., constants)
-            std::string sourceArg = processExpressionAsArg(assign->right);
-            coqOutput << "  StatelessOp AddOp " << sourceArg << " (ConstantArg (repr 0%Z)) "
-                      << targetIdent << ".\n\n";
+            error("Unsupported expression on right side of assignment: %s",
+                  assign->right->toString().c_str());
         }
     }
 
