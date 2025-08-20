@@ -55,8 +55,8 @@ class CoqVisitor : public Inspector {
         // coqOutput << "(* From MyProject Require Import CrSymbolicSemantics.*)\n";
         // coqOutput << "(* From MyProject Require Import CrConcreteSemantics.*)\n";
         // coqOutput << "From MyProject Require Import ConcreteToSymbolicLemmas.\n";
-        // coqOutput << "From MyProject Require Export CrIdentifiers.\n";
-        // coqOutput << "From MyProject Require Export CrTransformer.\n";
+        coqOutput << "From MyProject Require Import CrIdentifiers.\n";
+        coqOutput << "From MyProject Require Import Integers.\n";
         coqOutput << "Require Import Strings.String.\n";
         coqOutput << "Open Scope string_scope.\n";
         coqOutput << "Require Import ZArith.\n";
