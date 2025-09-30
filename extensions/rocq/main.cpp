@@ -22,6 +22,7 @@
 #include "lib/error.h"
 #include "options.h"
 #include "test/gtest/helpers.h"
+#include "rocq_helpers.h"
 
 namespace P4::Rocq {
 

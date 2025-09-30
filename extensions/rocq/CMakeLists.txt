@@ -1,5 +1,5 @@
 set(ROCQ_SRCS
- main.cpp options.cpp
+ main.cpp options.cpp rocq_helpers.cpp
 # XXX These should be in a library.
 ${P4C_SOURCE_DIR}/test/gtest/helpers.cpp)
 add_executable(rocq ${ROCQ_SRCS})
