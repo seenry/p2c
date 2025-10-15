@@ -191,7 +191,7 @@ int main(int argc, char *const argv[]) {
     std::string generatedCode = coqVisitor.getCoqCode();
     std::cout << generatedCode << std::endl;
 
-    std::ofstream coqFile("output.v");
+    std::ofstream coqFile("output.sexp");
     if (coqFile.is_open()) {
         coqFile << generatedCode;
         coqFile.close();
