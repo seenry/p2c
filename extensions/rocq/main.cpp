@@ -45,7 +45,8 @@ class CoqVisitor : public Inspector {
     std::map<std::string, std::string> headerFieldToCoqIdent;
     std::vector<std::string> actions;
     std::vector<std::string> tables;
-    int header_uid = 1;  // For generating unique HeaderCtr IDs
+    int header_uid = 0;  // For generating unique HeaderCtr IDs
+    std::map<cstring, int> fieldToUID;
 
  public:
     CoqVisitor() {
@@ -57,23 +58,20 @@ class CoqVisitor : public Inspector {
     /*
     Responsible for the part immediately after (CaracaraProgramDef
     e.g.,
-    (Coq_cons (Coq_xH) Coq_nil)
-    Coq_nill 
-    Coq_nill
+    (Coq_cons Coq_xH Coq_nil)
+    Coq_nil
+    Coq_nil
 
     We consider every header field a seperate header and only support one of them.
     */
     bool preorder(const IR::Type_Header *header) override {
         for (auto field : header->fields) {
-            coqOutput << "(Coq_cons (" + pos_to_str(header_uid++) + ") Coq_nil)";
+            header_uid++;
+            fieldToUID[field->name] = header_uid;
+            coqOutput << "(Coq_cons " + pos_to_str(header_uid) + " Coq_nil)";
         }
 
-        if(header_uid > 2){
-            error("Only one header is supported");
-            return false;
-        }
-
-        coqOutput << "\n Coq_nill \n Coq_nill\n";
+        coqOutput << "\n Coq_nil \n Coq_nil\n";
         return true;
     }
 
@@ -132,8 +130,8 @@ class CoqVisitor : public Inspector {
             coqOutput << "  StatelessOp AddOp " << sourceArg
                       << " (ConstantArg " + int_to_str(0) + ") (" << targetIdent << "))\n\n";
         } else {
-            error("Unsupported expression on right side of assignment: %s",
-                  assign->right->toString().c_str());
+            BUG("Unsupported expression on right side of assignment: %s",
+                assign->right->toString().c_str());
         }
     }
 
@@ -150,8 +148,8 @@ class CoqVisitor : public Inspector {
                 coqOutput << "Coq_nil))) \n";
 
             } else {  // Else in case we haven't implemented.
-                error("Unsupported statement type in action %s: %s", actionName.c_str(),
-                      stmt->toString().c_str());
+                BUG("Unsupported statement type in action %s: %s", actionName.c_str(),
+                    stmt->toString().c_str());
             }
         }
         return true;
