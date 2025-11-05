@@ -45,7 +45,7 @@ class CoqVisitor : public Inspector {
     std::map<std::string, std::string> headerFieldToCoqIdent;
     std::vector<std::string> actions;
     std::vector<std::string> tables;
-    int header_uid = 0;  // For generating unique HeaderCtr IDs
+    int header_uid = 1;  // For generating unique HeaderCtr IDs
     std::map<cstring, int> fieldToUID;
 
  public:
@@ -66,9 +66,9 @@ class CoqVisitor : public Inspector {
     */
     bool preorder(const IR::Type_Header *header) override {
         for (auto field : header->fields) {
-            header_uid++;
             fieldToUID[field->name] = header_uid;
             coqOutput << "(Coq_cons " + pos_to_str(header_uid) + " Coq_nil)";
+            header_uid++;
         }
 
         coqOutput << "\n Coq_nil \n Coq_nil\n";
@@ -126,9 +126,9 @@ class CoqVisitor : public Inspector {
 
         } else if (assign->right->is<IR::Member>() || assign->right->is<IR::Constant>()) {
             // Handle simple assignments (e.g., b = a; or b = 1;) by modeling them as `b = a + 0`
-            std::string sourceArg = processExpressionAsArg(assign->right);
+            std::string sourceArg = processExpressionAsArg(assign->right); // This is constantArg a which will be added to 0 below.
             coqOutput << "  StatelessOp AddOp " << sourceArg
-                      << " (ConstantArg " + int_to_str(0) + ") (" << targetIdent << "))\n\n";
+                      << " (ConstantArg " + int_to_str(0) + ") " << targetIdent << ")\n\n";
         } else {
             BUG("Unsupported expression on right side of assignment: %s",
                 assign->right->toString().c_str());
