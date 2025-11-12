@@ -98,7 +98,7 @@ class CoqVisitor : public Inspector {
     // Converts P4 operation types to a string representing the COQ operation type
     std::string p4OpToCoqOp(const IR::Operation_Binary *binOp) {
         if (binOp->is<IR::Add>()) return "AddOp";
-        // if (binOp->is<IR::Sub>()) return "SubOp";
+        if (binOp->is<IR::Sub>()) return "SubOp";
         // if (binOp->is<IR::BAnd>()) return "AndOp";
         // if (binOp->is<IR::BOr>()) return "OrOp";
         // if (binOp->is<IR::BXor>()) return "XorOp";
@@ -117,20 +117,20 @@ class CoqVisitor : public Inspector {
         // Check if the right-hand side is a binary operation (e.g., a + b). -= is expanded prior to
         // this pass
         if (auto binOp = assign->right->to<IR::Operation_Binary>()) {
-            // std::string coqOp = p4OpToCoqOp(binOp);
-            // std::string leftArg = processExpressionAsArg(binOp->left);
-            // std::string rightArg = processExpressionAsArg(binOp->right);
+            std::string coqOp = p4OpToCoqOp(binOp);
+            std::string leftArg = processExpressionAsArg(binOp->left);
+            std::string rightArg = processExpressionAsArg(binOp->right);
 
-            // coqOutput << "  StatelessOp (" << coqOp << " " << leftArg << " " << rightArg << " "
-            //           << targetIdent << ".\n\n";
+            coqOutput << "  StatelessOp " << coqOp << " " << leftArg << " " << rightArg << " "
+                      << targetIdent << ")\n\n";
 
         } else if (assign->right->is<IR::Member>() || assign->right->is<IR::Constant>()) {
             // Handle simple assignments (e.g., b = a; or b = 1;) by modeling them as `b = a + 0`
             std::string sourceArg = processExpressionAsArg(assign->right); // This is constantArg a which will be added to 0 below.
             coqOutput << "  StatelessOp AddOp " << sourceArg
-                      << " (ConstantArg " + int_to_str(0) + ") " << targetIdent << ")\n\n";
+                      << " (ConstantArg " + int_to_str(0) + ") \n" << targetIdent << ")\n\n";
         } else {
-            BUG("Unsupported expression on right side of assignment: %s",
+            error("Unsupported expression on right side of assignment: %s",
                 assign->right->toString().c_str());
         }
     }
@@ -148,7 +148,7 @@ class CoqVisitor : public Inspector {
                 coqOutput << "Coq_nil))) \n";
 
             } else {  // Else in case we haven't implemented.
-                BUG("Unsupported statement type in action %s: %s", actionName.c_str(),
+                error("Unsupported statement type in action %s: %s", actionName.c_str(),
                     stmt->toString().c_str());
             }
         }
