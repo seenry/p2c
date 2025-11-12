@@ -67,6 +67,7 @@ class CoqVisitor : public Inspector {
     bool preorder(const IR::Type_Header *header) override {
         for (auto field : header->fields) {
             fieldToUID[field->name] = header_uid;
+            // error("Mapping field %1% to UID %2%", field->name, header_uid);
             coqOutput << "(Coq_cons " + pos_to_str(header_uid) + " Coq_nil)";
             header_uid++;
         }
@@ -75,9 +76,43 @@ class CoqVisitor : public Inspector {
         return true;
     }
 
-    // We return Coq_xH since only one header is supported.
+  // We resolve the header field expression by looking up its name
+    // in the map populated by the preorder visitor.
     std::string resolveHeaderField(const IR::Expression *expr) {
-        return pos_to_str(header_uid - 1); 
+        cstring fieldName;
+
+        // HAPPY CASE The expression is most likely a Member access (e.g., "hdr.my_field")
+        if (auto member = expr->to<IR::Member>()) {
+            fieldName = member->member;
+            // error("1resolveHeaderField: Found Member expression with field name %1%", fieldName);
+        } 
+        // LEFT FOR LATER It could also be a PathExpression (e.g., just "my_field")
+        else if (auto path = expr->to<IR::PathExpression>()) {
+            fieldName = path->path->name;
+            error("2resolveHeaderField: Found PathExpression with field name %1%", fieldName);
+        } 
+        // Handle other cases or throw an error
+        else {
+            error("resolveHeaderField: Unexpected expression type %1%", expr);
+            // Return a default/error value
+            return "Coq_nil"; 
+        }
+
+        // Look up the field name in your map
+        auto it = fieldToUID.find(fieldName);
+        if (it != fieldToUID.end()) {
+            // Found it. Get the UID.
+            unsigned uid = it->second;
+            // Convert the UID to the Coq string format
+            // error("resolveHeaderField: Resolved field %1% to UID %2% which mapped to %3%", fieldName, uid, pos_to_str(uid));
+            return pos_to_str(uid);
+            
+        } else {
+            // Field was not found in the map. This indicates a problem.
+            error("resolveHeaderField: Could not find UID for field %1%", fieldName);
+            // Return a default/error value
+            return "Coq_nil"; 
+        }
     }
 
     // Helper method to process an expression and get its Rocq FunctionArgument representation.
@@ -114,8 +149,7 @@ class CoqVisitor : public Inspector {
         // Resolve the left-hand side (the target of the assignment)
         std::string targetIdent = resolveHeaderField(assign->left);
 
-        // Check if the right-hand side is a binary operation (e.g., a + b). -= is expanded prior to
-        // this pass
+        // Check if the right-hand side is a binary operation (e.g., a + b).
         if (auto binOp = assign->right->to<IR::Operation_Binary>()) {
             std::string coqOp = p4OpToCoqOp(binOp);
             std::string leftArg = processExpressionAsArg(binOp->left);
@@ -130,8 +164,8 @@ class CoqVisitor : public Inspector {
             coqOutput << "  StatelessOp AddOp " << sourceArg
                       << " (ConstantArg " + int_to_str(0) + ") \n" << targetIdent << ")\n\n";
         } else {
-            error("Unsupported expression on right side of assignment: %s",
-                assign->right->toString().c_str());
+            error("Unsupported expression on right side of assignment: %s \t %s",
+                assign->right->toString().c_str(), resolveHeaderField(assign->right).c_str());
         }
     }
 
