@@ -45,12 +45,16 @@ make -j4
 Support assignment to variables or headers instead of constants
 Go from there and broaden the scope of things. Make sure anythign that is unsupported raises an exception. 
 few weeks from now. ebpf pointer modeling compcert wrote a paper on this (but a little too involved).
-P237 Porgram logics for certified compilers has a reference to something simpler (a more basic starting point). References in the back also have some stuff 30,26. Proving pointer programs in hoare logic. Joe suggested instead of a map index into a map by integer adress (but arithmetic is not allowed). Something like that for ebpf. 
-Other issue ebpf interacting with the OS
-uninterpretive functions
+Add extra actions
 
-Look into extraction process. Software foundations has something on this 
-Mlton whole program optimizing compiler. Could run ocaml through this. kcaml
-
-1. expand the P4C compiler 
-2.  is look at extraction 
+# Minus Operation
+The P4C compiler presents expanded subtraction operations with constants as the addition of the 1s complement.
+```
+hdr.h.a -= 1;     |     SubOp (HeaderArg Coq_xH) (ConstantArg (Zpos Coq_xH))
+hdr.h.a -= 0;     |     SubOp (HeaderArg Coq_xH) (ConstantArg Z0)
+hdr.h.a -= 2;     |     SubOp (HeaderArg Coq_xH) (ConstantArg (Zpos (Coq_xO Coq_xH)))
+hdr.h.a -= 3;     |     SubOp (HeaderArg Coq_xH) (ConstantArg (Zpos (Coq_xI Coq_xH)))
+hdr.h.a += -1;     |      Warning for negative value with unsigned type and overflow with add op. AddOp (HeaderArg Coq_xH) (ConstantArg (Zpos (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI Coq_xH)))))))))
+hdr.h.a = hdr.h.a - 1;     |      AddOp (HeaderArg Coq_xH) (ConstantArg (Zpos (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI Coq_xH)))))))))
+hdr.h.a = hdr.h.a + -1;     |      WARNING AddOp (HeaderArg Coq_xH) (ConstantArg (Zpos (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI (Coq_xI Coq_xH)))))))))
+```
