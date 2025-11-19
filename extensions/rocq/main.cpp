@@ -135,12 +135,12 @@ class CoqVisitor : public Inspector {
     std::string p4OpToCoqOp(const IR::Operation_Binary *binOp) {
         if (binOp->is<IR::Add>()) return "AddOp";
         if (binOp->is<IR::Sub>()) return "SubOp";
-        // if (binOp->is<IR::BAnd>()) return "AndOp";
-        // if (binOp->is<IR::BOr>()) return "OrOp";
-        // if (binOp->is<IR::BXor>()) return "XorOp";
-        // if (binOp->is<IR::Mul>()) return "MulOp";
-        // if (binOp->is<IR::Div>()) return "DivOp";
-        // if (binOp->is<IR::Mod>()) return "ModOp";
+        if (binOp->is<IR::BAnd>()) return "AndOp";
+        if (binOp->is<IR::BOr>()) return "OrOp";
+        if (binOp->is<IR::BXor>()) return "XorOp";
+        if (binOp->is<IR::Mul>()) return "MulOp";
+        if (binOp->is<IR::Div>()) return "DivOp";
+        if (binOp->is<IR::Mod>()) return "ModOp";
 
         error("Unsupported binary operation: %s", binOp->toString());
         return "(* unsupported_op *)";
