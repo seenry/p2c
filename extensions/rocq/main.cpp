@@ -65,13 +65,14 @@ class CoqVisitor : public Inspector {
     We consider every header field a seperate header and only support one of them.
     */
     bool preorder(const IR::Type_Header *header) override {
+        coqOutput << "(Coq_cons "
         for (auto field : header->fields) {
             fieldToUID[field->name] = header_uid;
             // error("Mapping field %1% to UID %2%", field->name, header_uid);
-            coqOutput << "(Coq_cons " + pos_to_str(header_uid) + " Coq_nil)";
+            coqOutput << pos_to_str(header_uid) + " ";
             header_uid++;
         }
-
+        coqOutput << "Coq_nil) \n";
         coqOutput << "\n Coq_nil \n Coq_nil\n";
         return true;
     }
