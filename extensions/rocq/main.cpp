@@ -178,6 +178,21 @@ class CoqVisitor : public Inspector {
     std::map<std::string, Guard> validityOf;
     bool parserIsTree = true;
 
+    // Boolean locals of a control, as GUARDS rather than values.
+    //
+    // `bool is_sip = hdr.sip.isValid();` cannot become a Header holding a
+    // value: validity is a predicate over already-parsed fields, not something
+    // the state stores, and there is no boolean in CrVal to hold it anyway.
+    // Binding the name to the guard its initializer denotes, and substituting
+    // it where the name is tested, keeps both the declaration and its uses
+    // exact -- and `!is_sip` then negates through [negateGuard] like any other
+    // condition.
+    std::map<std::string, Guard> boolLocals;
+    // Boolean locals declared but not yet assigned.  The frontend splits
+    // `bool is_sip = hdr.sip.isValid();` into a bare declaration and an
+    // assignment, so the name has to be known before its guard is.
+    std::set<std::string> pendingBoolLocals;
+
     // An entry, in the one form both sources reduce to.  `const entries` in
     // the P4 source and a line of --table-entries say the same thing, so they
     // are read into this and lowered once.
@@ -223,6 +238,7 @@ class CoqVisitor : public Inspector {
     std::vector<FieldInfo> temps;
 
     // Ingress parser and deparser, populated by their preorder visitors.
+    int parsedBits = 0;  // see [inputLenBits]
     int nextParserLabel = 1;
     std::map<std::string, int> stateLabel;      // P4 state name -> entry label
     std::vector<std::string> parserStates;      // emitted ParserStateDef sexps
@@ -331,35 +347,32 @@ bool preorder(const IR::Type_Header *header) override {
 // One IR Header per instance field, keyed on "<instance>.<field>".  A struct
 // with no header-typed fields (`struct metadata`) contributes nothing.
 bool preorder(const IR::Type_Struct *st) override {
-    // A struct of plain bit<N> fields is metadata -- `struct metadata`, or
-    // v1model's `standard_metadata_t`.  Those are variables like any other and
-    // need Headers, but they are NOT on the wire: nothing extracts or emits
-    // them, and counting them in the packet length would be wrong.  Fields
-    // with no bit width (an `error`, an enum) are skipped rather than
-    // reported: v1model's intrinsic metadata has several, and none of them is
-    // something this backend can represent or a program is likely to want.
-    bool anyHeaderFields = false;
-    for (auto inst : st->fields) {
-        if (headerTypeOf(inst->type) != nullptr) anyHeaderFields = true;
-    }
-    if (!anyHeaderFields) {
-        for (auto f : st->fields) {
-            int width = widthOf(f->type);
-            if (width <= 0 || width > 64) continue;
-            std::string qualified =
-                std::string(st->name.name.c_str()) + "." + std::string(f->name.name.c_str());
-            if (fieldByQualified.count(qualified)) continue;
-            FieldInfo fi{qualified, header_uid++, width, false};
-            fields.push_back(fi);
-            fieldByQualified[fi.qualified] = fi;
-        }
-        return true;
+    // A struct can hold both.  `struct headers` is all header instances;
+    // `struct metadata` is all plain fields; SipHash's ig_metadata_t is a
+    // mixture -- three bit<N> scratch variables beside a header-typed one --
+    // so these are two passes over the same struct, not a choice between them.
+    //
+    // A plain field is METADATA: a variable like any other, keyed on the
+    // struct TYPE (the parameter name is the program's choice), and flagged
+    // off-wire so [fieldsOfInstance] cannot expand an extract or an emit over
+    // it.  Fields with no bit width -- a bool, an error, an enum -- are
+    // skipped rather than reported: v1model's intrinsic metadata has several,
+    // and none is something this backend can represent.
+    for (auto f : st->fields) {
+        if (headerTypeOf(f->type) != nullptr) continue;
+        int width = widthOf(f->type);
+        if (width <= 0 || width > 64) continue;
+        std::string qualified =
+            std::string(st->name.name.c_str()) + "." + std::string(f->name.name.c_str());
+        if (fieldByQualified.count(qualified)) continue;
+        FieldInfo fi{qualified, header_uid++, width, false};
+        fields.push_back(fi);
+        fieldByQualified[fi.qualified] = fi;
     }
 
     for (auto inst : st->fields) {
         const IR::Type_Header *hdrType = headerTypeOf(inst->type);
         if (hdrType == nullptr) continue;
-
         for (auto field : hdrType->fields) {
             std::string qualified = std::string(inst->name.name.c_str()) + "." +
                                     std::string(field->name.name.c_str());
@@ -672,6 +685,16 @@ bool preorder(const IR::Type_Struct *st) override {
             return "(OpHeader " + pos_to_str(fi->uid) + ")";
         }
 
+        if (auto call = e->to<IR::MethodCallExpression>()) {
+            auto m = call->method->to<IR::Member>();
+            if (m != nullptr && m->member == "get") {
+                error("%1%: a Random extern has no lowering yet. It should become a free "
+                      "input the two compared programs SHARE, which is the right modelling "
+                      "for a relational check, but that needs the metadata prefix",
+                      e);
+                return constOperand(0);
+            }
+        }
         error("Unsupported expression: %1%", e);
         return constOperand(0);
     }
@@ -816,6 +839,13 @@ void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::str
         if (auto rel = cond->to<IR::Operation_Relation>()) {
             return lowerRelation(rel, g, setup);
         }
+        if (auto path = cond->to<IR::PathExpression>()) {
+            auto it = boolLocals.find(std::string(path->path->name.name.c_str()));
+            if (it != boolLocals.end()) {
+                mergeGuard(g, it->second);
+                return true;
+            }
+        }
         error("unsupported condition: %1%", cond);
         return false;
     }
@@ -839,6 +869,44 @@ void declareLocal(const std::string &name, int width, const IR::Node *at) {
     localHeaders[name] = fi;
 }
 
+// One statement of an action body.  Split out from the loop below so a block
+// can recurse into it.
+void lowerActionStatement(const IR::StatOrDecl *stmt, const std::string &actionName,
+                          std::vector<std::string> &ops) {
+    if (auto blk = stmt->to<IR::BlockStatement>()) {
+        // An annotated group -- TNA writes `@in_hash { ... }` around the
+        // rotates in SipHash -- is a block whose annotation is a placement
+        // hint for the hardware and carries no semantics here.
+        for (auto inner : blk->components) lowerActionStatement(inner, actionName, ops);
+    } else if (auto decl = stmt->to<IR::Declaration_Variable>()) {
+        declareLocal(std::string(decl->name.name.c_str()), widthOf(decl->type), decl);
+        if (decl->initializer != nullptr) {
+            error("a local with an initializer is not supported yet: %1%", decl);
+        }
+    } else if (auto assign = stmt->to<IR::AssignmentStatement>()) {
+        lowerAssignment(assign, ops);
+    } else if (auto mc = stmt->to<IR::MethodCallStatement>()) {
+        auto path = mc->methodCall->method->to<IR::PathExpression>();
+        if (path != nullptr && path->path->name == "mark_to_drop") {
+            lowerDrop(mc, ops);
+            return;
+        }
+        auto m = mc->methodCall->method->to<IR::Member>();
+        if (m != nullptr && (m->member == "setValid" || m->member == "setInvalid")) {
+            error("%1%: the IR has no header validity bit, so a header cannot be made "
+                  "valid or invalid by a control -- only by whether the parser extracted "
+                  "it. See the deparser note in SOUNDNESS.md",
+                  mc);
+            return;
+        }
+        error("only mark_to_drop is supported as a call inside an action; calling one "
+              "action from another would need it inlined: %1%",
+              mc);
+    } else {
+        error("Unsupported statement type in action %1%: %2%", actionName.c_str(), stmt);
+    }
+}
+
 bool preorder(const IR::P4Action *action) override {
     std::string actionName = action->name.name.c_str();
     actions.push_back(actionName);
@@ -857,27 +925,7 @@ bool preorder(const IR::P4Action *action) override {
     actionParams[actionName] = params;
 
     std::vector<std::string> ops;
-    for (auto stmt : action->body->components) {
-        if (auto decl = stmt->to<IR::Declaration_Variable>()) {
-            declareLocal(std::string(decl->name.name.c_str()), widthOf(decl->type), decl);
-            if (decl->initializer != nullptr) {
-                error("a local with an initializer is not supported yet: %1%", decl);
-            }
-        } else if (auto assign = stmt->to<IR::AssignmentStatement>()) {
-            lowerAssignment(assign, ops);
-        } else if (auto mc = stmt->to<IR::MethodCallStatement>()) {
-            auto path = mc->methodCall->method->to<IR::PathExpression>();
-            if (path != nullptr && path->path->name == "mark_to_drop") {
-                lowerDrop(mc, ops);
-            } else {
-                error("only mark_to_drop is supported as a call inside an action; "
-                      "calling one action from another would need it inlined: %1%",
-                      mc);
-            }
-        } else {
-            error("Unsupported statement type in action %1%: %2%", actionName.c_str(), stmt);
-        }
-    }
+    for (auto stmt : action->body->components) lowerActionStatement(stmt, actionName, ops);
 
     localHeaders.clear();
     actionOps[actionName] = ops;
@@ -1293,10 +1341,41 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         return out;
     }
 
-    // "hdr.ipv4" -> "ipv4"
+    // The instance an extract or an emit names.  Usually `hdr.ipv4`, whose
+    // instance is the member; TNA also extracts a bare PARAMETER --
+    // `pkt.extract(ig_intr_md)`, the port metadata ahead of the packet -- and
+    // that one is keyed on its type, the same way a metadata struct is, since
+    // the parameter name is the program's choice.
     std::string instanceNameOf(const IR::Expression *e) {
         if (auto m = e->to<IR::Member>()) return m->member.name.c_str();
+        if (e->is<IR::PathExpression>() && typeMap != nullptr) {
+            auto t = canonicalTypeOf(typeMap->getType(e, false));
+            if (t != nullptr) {
+                if (auto ts = t->to<IR::Type_StructLike>()) return std::string(ts->name.name.c_str());
+            }
+        }
         return "";
+    }
+
+    // Give a parser or control parameter of header type its Headers.  A struct
+    // parameter is already covered by [preorder(Type_Struct)], which sees the
+    // declaration; a header-typed one -- TNA's intrinsic metadata -- is only
+    // ever reachable through the parameter.
+    void declareParamFields(const IR::ParameterList *params) {
+        for (auto p : params->parameters) {
+            auto hdrType = canonicalTypeOf(p->type)->to<IR::Type_Header>();
+            if (hdrType == nullptr) continue;
+            std::string inst(hdrType->name.name.c_str());
+            for (auto f : hdrType->fields) {
+                int width = widthOf(f->type);
+                if (width <= 0 || width > 64) continue;
+                std::string qualified = inst + "." + std::string(f->name.name.c_str());
+                if (fieldByQualified.count(qualified)) continue;
+                FieldInfo fi{qualified, header_uid++, width, true};
+                fields.push_back(fi);
+                fieldByQualified[fi.qualified] = fi;
+            }
+        }
     }
 
     // A [ParserTarget]: accept/reject are pseudo-states, anything else is a
@@ -1379,7 +1458,28 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         return "(Select " + listSexp(cases) + " " + dflt + ")";
     }
 
+    // Does any state of [parser] extract [inst]?  See the setInvalid case:
+    // P4 says an `out` parameter starts invalid, so a parser that goes on to
+    // fill one makes that initialization dead -- and a parser that does not is
+    // asking for a validity bit the IR has not got.
+    bool extractedSomewhere(const IR::P4Parser *parser, const std::string &inst) {
+        for (auto st : parser->states) {
+            for (auto c : st->components) {
+                auto mc = c->to<IR::MethodCallStatement>();
+                if (mc == nullptr) continue;
+                auto m = mc->methodCall->method->to<IR::Member>();
+                if (m == nullptr || m->member != "extract") continue;
+                if (mc->methodCall->arguments->size() != 1) continue;
+                if (instanceNameOf(mc->methodCall->arguments->at(0)->expression) == inst) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     bool preorder(const IR::P4Parser *parser) override {
+        declareParamFields(parser->type->applyParams);
         if (parserStates.empty()) computeValidity(parser);
         if (!parserStates.empty()) {
             warning(P4::ErrorType::WARN_IGNORE_PROPERTY,
@@ -1403,16 +1503,57 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             std::string n = st->name.name.c_str();
             if (n == "accept" || n == "reject") continue;
 
-            std::vector<std::string> extracted;  // qualified field names, in order
+            // The state's ParserOps, in source order.  A state does one
+            // thing, so a state doing n of them becomes a chain of n IR
+            // states and only the last carries the transition.
+            std::vector<std::string> acts;
             for (auto c : st->components) {
                 auto mc = c->to<IR::MethodCallStatement>();
                 if (mc == nullptr) {
-                    error("unsupported statement in parser state %1%", n.c_str());
+                    error("unsupported statement in parser state %1%: %2%", n.c_str(), c);
                     continue;
                 }
                 auto m = mc->methodCall->method->to<IR::Member>();
+                if (m != nullptr && m->member == "advance") {
+                    // `pkt.advance(n)` skips n bits without storing them,
+                    // which is exactly SeekForward.  TNA's port-metadata
+                    // prologue is the reason this is needed.
+                    if (mc->methodCall->arguments->size() != 1) {
+                        error("advance takes one argument: %1%", mc);
+                        continue;
+                    }
+                    auto k = mc->methodCall->arguments->at(0)->expression->to<IR::Constant>();
+                    if (k == nullptr) {
+                        error("advance by a non-constant is not supported: %1%", mc);
+                        continue;
+                    }
+                    int bits = static_cast<int>(k->value.convert_to<unsigned long long>());
+                    acts.push_back("(Some (SeekForward " + std::to_string(bits) + "))");
+                    parsedBits += bits;
+                    continue;
+                }
+                if (m != nullptr && m->member == "setInvalid") {
+                    // P4 says an `out` parameter starts invalid, and inlining a
+                    // sub-parser makes that explicit -- TNA's ingress parser
+                    // arrives here as `ig_intr_md.setInvalid()` immediately
+                    // before the extract that fills it.  Dropping it is exact
+                    // when this state goes on to extract the same instance,
+                    // because the extract overwrites every field; anywhere
+                    // else it would be the validity bit the IR does not have.
+                    std::string inv = instanceNameOf(m->expr);
+                    // Inlining separates the two: the invalidation lands in the
+                    // caller's state and the extract in the callee's, so the
+                    // question is whether the PARSER fills it, not this state.
+                    if (extractedSomewhere(parser, inv)) continue;
+                    error("%1%: the IR has no header validity bit, and no state of this "
+                          "parser extracts %2%, so the invalidation cannot be dropped",
+                          mc, inv.c_str());
+                    continue;
+                }
                 if (m == nullptr || m->member != "extract") {
-                    error("only b.extract is supported in a parser state (%1%)", n.c_str());
+                    error("only b.extract and b.advance are supported in a parser state: "
+                          "%1%",
+                          mc);
                     continue;
                 }
                 if (mc->methodCall->arguments->size() != 1) {
@@ -1422,33 +1563,36 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
                 }
                 std::string inst =
                     instanceNameOf(mc->methodCall->arguments->at(0)->expression);
-                for (const auto &q : fieldsOfInstance(inst)) extracted.push_back(q);
-                if (fieldsOfInstance(inst).empty()) {
+                std::vector<std::string> insFields = fieldsOfInstance(inst);
+                if (insFields.empty()) {
                     error("b.extract(%1%) names no allocated header instance", inst.c_str());
+                }
+                for (const auto &q : insFields) {
+                    const FieldInfo *fi = lookupField(q);
+                    acts.push_back("(Some (ExtractOpConstructor " + pos_to_str(fi->uid) + " " +
+                                   std::to_string(fi->width) + " " + containerFor(fi->width) +
+                                   "))");
+                    parsedBits += fi->width;
                 }
             }
 
             std::string trans = transitionOf(st->selectExpression);
 
-            if (extracted.empty()) {
+            if (acts.empty()) {
                 emitParserState(stateLabel[n], "None", trans);
                 continue;
             }
-            for (size_t i = 0; i < extracted.size(); ++i) {
-                const FieldInfo *fi = lookupField(extracted[i]);
-                std::ostringstream act;
-                act << "(Some (ExtractOpConstructor " << pos_to_str(fi->uid) << " "
-                    << fi->width << " " << containerFor(fi->width) << "))";
-                bool last = (i + 1 == extracted.size());
+            for (size_t i = 0; i < acts.size(); ++i) {
+                bool last = (i + 1 == acts.size());
                 int label = (i == 0) ? stateLabel[n] : nextParserLabel++;
                 // A chained state's successor is allocated as we go, so the
                 // label of state i+1 has to be known before state i is emitted.
                 if (!last) {
                     int next = nextParserLabel;  // what the next iteration takes
-                    emitParserState(label, act.str(),
+                    emitParserState(label, acts[i],
                                     "(Unconditional (TargetState " + pos_to_str(next) + "))");
                 } else {
-                    emitParserState(label, act.str(), trans);
+                    emitParserState(label, acts[i], trans);
                 }
             }
         }
@@ -1560,6 +1704,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
     // Deparser: the first control taking a packet_out.  b.emit(hdr.X) becomes
     // one EmitOpConstructor per field of X, in declaration order.
     bool preorder(const IR::P4Control *control) override {
+        declareParamFields(control->type->applyParams);
         bool isDeparser = false;
         for (auto p : control->type->applyParams->parameters) {
             if (auto tn = p->type->to<IR::Type_Name>()) {
@@ -1697,7 +1842,50 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             }
             return;
         }
+        if (auto decl = s->to<IR::Declaration_Variable>()) {
+            std::string dname(decl->name.name.c_str());
+            if (decl->initializer == nullptr) {
+                if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
+                    pendingBoolLocals.insert(dname);
+                    return;
+                }
+                error("a local with no initializer is not supported here: %1%", decl);
+                return;
+            }
+            // A boolean local is a named guard; anything else is a variable and
+            // gets a Header, like an action's local.
+            if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
+                Guard bg;
+                std::vector<std::string> setup;
+                if (!lowerCondition(decl->initializer, bg, setup)) return;
+                if (!setup.empty()) out.push_back(Group{g, {}, {Alt{{}, setup, 0}}});
+                boolLocals[dname] = bg;
+                return;
+            }
+            declareLocal(dname, widthOf(decl->type), decl);
+            auto lit = localHeaders.find(dname);
+            if (lit == localHeaders.end()) return;
+            std::vector<std::string> dops;
+            std::string dty = containerFor(lit->second.width);
+            std::string dv = lowerExpr(decl->initializer, dty, dops);
+            dops.push_back("(StatelessOp AddOp " + dty + " " + dv + " (OpConst 0) " +
+                           pos_to_str(lit->second.uid) + ")");
+            out.push_back(Group{g, {}, {Alt{{}, dops, 0}}});
+            return;
+        }
         if (auto assign = s->to<IR::AssignmentStatement>()) {
+            if (auto lp = assign->left->to<IR::PathExpression>()) {
+                std::string lname(lp->path->name.name.c_str());
+                if (pendingBoolLocals.count(lname) || boolLocals.count(lname)) {
+                    Guard bg;
+                    std::vector<std::string> setup;
+                    if (!lowerCondition(assign->right, bg, setup)) return;
+                    if (!setup.empty()) out.push_back(Group{g, {}, {Alt{{}, setup, 0}}});
+                    boolLocals[lname] = bg;
+                    pendingBoolLocals.erase(lname);
+                    return;
+                }
+            }
             std::vector<std::string> ops;
             lowerAssignment(assign, ops);
             if (!ops.empty()) out.push_back(Group{g, {}, {Alt{{}, ops, 0}}});
@@ -1748,6 +1936,19 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         if (!zeroing.empty()) groups.push_back(Group{Guard{}, {}, {Alt{{}, zeroing, 0}}});
 
         for (auto control : pipelineControls) {
+            // The frontend hoists a local out of the apply body into the
+            // control's declarations, so `bool is_sip = ...` arrives as a bare
+            // declaration here and a plain assignment there.
+            for (auto d : control->controlLocals) {
+                auto decl = d->to<IR::Declaration_Variable>();
+                if (decl == nullptr) continue;
+                std::string dname(decl->name.name.c_str());
+                if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
+                    pendingBoolLocals.insert(dname);
+                } else if (localHeaders.count(dname) == 0) {
+                    declareLocal(dname, widthOf(decl->type), decl);
+                }
+            }
             flattenStatement(control->body, Guard{}, groups);
         }
 
@@ -1868,13 +2069,11 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
 
     // Bits the parser may consume.  Phase 5 replaces this with the longest
     // parse path; the sum of every declared field is a safe over-estimate.
-    int inputLenBits() const {
-        int total = 0;
-        for (const auto &f : fields) {
-            if (f.onWire) total += f.width;
-        }
-        return total;
-    }
+    // Bits the parser may consume: what the emitted extractions and seeks add
+    // up to.  Summing every declared field instead would count a metadata
+    // header nothing parses, and the two programs a comparison is about have
+    // to agree on this number or the checker refuses to compare them at all.
+    int inputLenBits() const { return parsedBits; }
 
     // The Header allocation, for debugging.  It is internal state, not part of
     // the emitted program: GeneralCaracaraProgramDef carries no header list,
