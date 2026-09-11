@@ -818,6 +818,15 @@ void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::str
     // not, and there is no trying the next disjunct.  Refused, not guessed.
     static bool negateDnf(const Dnf &in, Dnf &out) {
         if (in.empty()) return false;
+        // `not (not C)` is C.  Dropping this case cost ConQuest's baseline.p4
+        // its else branch, since `x != 0` is stored as a negative clause and
+        // negating it is how the else branch is reached.
+        if (in.size() == 1 && in[0].pos.empty() && in[0].neg.size() == 1) {
+            Guard g;
+            g.pos = in[0].neg[0];
+            out.push_back(g);
+            return true;
+        }
         Guard g;
         for (const auto &d : in) {
             if (!d.neg.empty()) return false;
