@@ -2,6 +2,8 @@
 #define _ROCQS_OPTIONS_H_
 
 #include "frontends/common/options.h"
+#include <string>
+
 #include "frontends/common/parser_options.h"
 
 namespace P4::Rocq {
@@ -17,6 +19,11 @@ class RocqOptions : public P4::CompilerOptions {
     RocqOptions &operator=(RocqOptions &&) = delete;
 
     bool useFixed = false;
+
+    // Entries for tables the P4 source does not populate itself.  See
+    // CoqVisitor::loadTableEntries for the format and for why they cannot
+    // simply be left to the control plane.
+    std::string tableEntries;
 };
 
 using RocqContext = P4::P4CContextWithOptions<RocqOptions>;

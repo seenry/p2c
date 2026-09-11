@@ -2,39 +2,39 @@
 
 namespace P4::Rocq {
 
+// CrTypeIF.ml's positive/nat/Z converters emit decimal and accept either
+// decimal or Coq's own encoding, so there is no reason to build a tower of
+// Coq_xO/Coq_xI here -- it only makes the output unreadable.  See the
+// "A network program can be read from a sexp now" note in ~/proj/ir/CLAUDE.md.
 std::string pos_to_str(int x_) {
     // positive should never be zero
-    if (x_ == 0) { return "invalid"; }
-
-    std::string rocq_str = "Coq_xH";
-    if (x_ == 1) { return rocq_str; }
-
-    // find leading bit
-    int bit_idx = (sizeof(x_) * 8) - 1;
-    while (((x_ >> bit_idx) & 0x1) == 0x0) { bit_idx--; }
-
-    // fill in bit string
-    bit_idx--; // safe because x_ > 1
-    do {
-        if (((x_ >> bit_idx) & 0x1) == 0x0) {
-            rocq_str = "(Coq_xO " + rocq_str + ")";
-        } else /* ... == 0x1 */ {
-            rocq_str = "(Coq_xI " + rocq_str + ")";
-        }
-    } while (bit_idx-- != 0);
-
-    return rocq_str;
+    if (x_ <= 0) { return "invalid"; }
+    return std::to_string(x_);
 }
 
-std::string int_to_str(int x_) {
-    if (x_ == 0) { return "Z0"; }
+std::string int_to_str(int x_) { return std::to_string(x_); }
 
-    if (x_ < 0) {
-        // works even if x_ = min e.g. (-8=0b1000 -> Zneg 0b1000)
-        return "(Zneg " + pos_to_str(-x_) + ")";
-    } /* else if (x_ > 0) {*/
-        return "(Zpos " + pos_to_str( x_) + ")";
-    // }
+// A [list bool] as the Coq_cons chain the .ir format uses.  There is no 0b
+// shorthand: CrTypeIF.ml derives [coq_SelectCase]'s converters, so a bool list
+// goes through the generic [Datatypes.list_of_sexp] and an atom like
+// "0b00000001" is rejected as an unexpected variant constructor.  (A 0b sugar
+// existed and was deliberately removed in ~/proj/ir 1a04afc, "remove bool list
+// syntactic sugar", which also rewrote the fixtures to this form.)
+//
+// MSB FIRST -- CrParser.bits_to_Z folds the head in as the high bit -- and
+// exactly [width] elements, because the list's LENGTH is what a SelectCase
+// slice is compared against, so leading zeros are significant.  Width 0 is the
+// empty list.
+std::string bits_to_str(unsigned long long value, int width) {
+    std::string s = "Coq_nil";
+    // Wrapping from the LSB outwards puts bit [width-1] at the head, which is
+    // what MSB-first means: each iteration pushes a more significant bit in
+    // front of everything already built.
+    for (int i = 0; i < width; ++i) {
+        s = "(Coq_cons " + std::string(((value >> i) & 1ULL) ? "Coq_true" : "Coq_false") +
+            " " + s + ")";
+    }
+    return s;
 }
 
-}
+}  // namespace P4::Rocq
