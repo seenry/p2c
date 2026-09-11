@@ -229,6 +229,23 @@ class CoqVisitor : public Inspector {
     // IR has no other place to put a value.
     std::map<std::string, FieldInfo> localHeaders;
 
+    // A control's own locals.  Separate from [localHeaders] because those are
+    // cleared per action, and these have to outlive every action in the
+    // control: with -O1 the frontend runs RemoveActionParameters, which turns a
+    // directionless action parameter into a control-local plus an assignment,
+    // so an action body refers to names declared on the control.  They are
+    // therefore declared when the CONTROL is visited, before its actions.
+    std::map<std::string, FieldInfo> controlLocalHeaders;
+
+    // `exit` ends the enclosing control's apply block; later statements in that
+    // control are skipped, while other controls and the deparser still run.
+    // There is nothing in a transformer that stops a chain, so it becomes a
+    // FLAG: the exit sets it, and every group emitted after it in the same
+    // control takes "the flag is still zero" into its guard.  Both are reset
+    // per control.
+    int exitFlagUid = 0;
+    int exitGroupIdx = -1;
+
     // The pipeline controls, in declaration order, and the ops they assemble
     // to.  Collected during traversal and lowered in [finalize], because a
     // control's actions are its children and are not lowered until after it.
@@ -608,8 +625,11 @@ bool preorder(const IR::Type_Struct *st) override {
     const FieldInfo *lookupVar(const IR::Expression *e) {
         if (e->is<IR::Member>()) return lookupField(qualifiedNameOf(e));
         if (auto p = e->to<IR::PathExpression>()) {
-            auto it = localHeaders.find(std::string(p->path->name.name.c_str()));
-            return it == localHeaders.end() ? nullptr : &it->second;
+            std::string n(p->path->name.name.c_str());
+            auto it = localHeaders.find(n);
+            if (it != localHeaders.end()) return &it->second;
+            auto ct = controlLocalHeaders.find(n);
+            if (ct != controlLocalHeaders.end()) return &ct->second;
         }
         return nullptr;
     }
@@ -791,6 +811,49 @@ bool preorder(const IR::Type_Struct *st) override {
 // The target's container fixes the type the whole statement is evaluated at,
 // and its declared width fixes the mask applied before the store.
 void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::string> &ops) {
+    // Assigning to a SLICE is a read-modify-write of the whole variable:
+    //   x = (x & ~mask) | ((e & ones(w)) << lo)
+    // There is no partial write in the IR -- an HdrOp names a Header and
+    // replaces its value -- so the bits outside the slice have to be carried
+    // through explicitly.  SipHash writes its 64-bit state this way, two
+    // 32-bit halves at a time.
+    if (auto sl = assign->left->to<IR::Slice>()) {
+        const FieldInfo *base = lookupVar(sl->e0);
+        if (base == nullptr) {
+            error("assignment to a slice of something that is not a variable: %1%",
+                  assign->left);
+            return;
+        }
+        int lo = static_cast<int>(sl->getL());
+        int hi = static_cast<int>(sl->getH());
+        std::string ty = containerFor(base->width);
+        int bits = containerBits(ty);
+        if (hi >= bits || lo > hi) {
+            error("slice %1% does not fit its variable", assign->left);
+            return;
+        }
+        unsigned long long fieldMask = maskOf(hi - lo + 1);
+        unsigned long long keepMask = maskOf(bits) & ~(fieldMask << lo);
+
+        std::string v = lowerExpr(assign->right, ty, ops);
+        v = narrowTo(v, hi - lo + 1, ty, ops);
+        if (lo > 0) {
+            int t = newTemp(bits);
+            ops.push_back("(StatelessOp MulOp " + ty + " " + v + " " +
+                          constOperand(1ULL << lo) + " " + pos_to_str(t) + ")");
+            v = "(OpHeader " + pos_to_str(t) + ")";
+        }
+        int keep = newTemp(bits);
+        ops.push_back("(StatelessOp AndOp " + ty + " (OpHeader " + pos_to_str(base->uid) +
+                      ") " + constOperand(keepMask) + " " + pos_to_str(keep) + ")");
+        int merged = newTemp(bits);
+        ops.push_back("(StatelessOp OrOp " + ty + " (OpHeader " + pos_to_str(keep) + ") " + v +
+                      " " + pos_to_str(merged) + ")");
+        ops.push_back("(StatelessOp AddOp " + ty + " (OpHeader " + pos_to_str(merged) +
+                      ") (OpConst 0) " + pos_to_str(base->uid) + ")");
+        return;
+    }
+
     const FieldInfo *tgt = lookupVar(assign->left);
     if (tgt == nullptr) {
         error("assignment to something that is not a header field, parameter or "
@@ -1433,16 +1496,31 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         }
 
         if (!setup.empty()) pushGroup(g, setup, out, table);
-        if (alts.empty()) return;
-        if (g.size() != 1) {
-            // This Group's arms are already the table's entries, so a
-            // disjunctive path condition would have to be multiplied through
-            // them.  Expressible -- it is the cross product -- but nothing
-            // needs it, and getting it silently wrong is worse than saying so.
-            error("%1%: a table applied under a disjunction is not supported yet", table);
-            return;
+        if (alts.empty() || g.empty()) return;
+
+        // This Group's arms are already the table's entries, so a disjunctive
+        // path condition multiplies through them.  Entry is the OUTER loop:
+        // entries are in priority order and a higher-priority one has to win
+        // whichever disjunct of the path condition holds.
+        for (size_t i = 1; i < g.size(); ++i) {
+            if (g[i].neg != g[0].neg) {
+                error("%1%: applied under a disjunction whose branches disagree about what "
+                      "must not hold, which one rule list cannot say",
+                      table);
+                return;
+            }
         }
-        out.push_back(Group{g[0], {}, alts});
+        std::vector<Alt> crossed;
+        for (const auto &a : alts) {
+            for (const auto &d : g) {
+                Alt x = a;
+                x.atoms.insert(x.atoms.begin(), d.pos.begin(), d.pos.end());
+                crossed.push_back(x);
+            }
+        }
+        Guard shared;
+        shared.neg = g[0].neg;
+        out.push_back(Group{shared, {}, crossed});
     }
 
     // ------------------------------------------------------------------
@@ -1838,6 +1916,27 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
     }
 
     // ------------------------------------------------------------------
+    // A control's locals, declared before its actions are lowered.  A boolean
+    // one is a named condition rather than a variable (see [boolLocals]), so it
+    // gets no Header; it is only noted as pending until something assigns it.
+    void declareControlLocals(const IR::P4Control *control) {
+        for (auto d : control->controlLocals) {
+            auto decl = d->to<IR::Declaration_Variable>();
+            if (decl == nullptr) continue;
+            std::string dname(decl->name.name.c_str());
+            if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
+                pendingBoolLocals.insert(dname);
+                continue;
+            }
+            if (controlLocalHeaders.count(dname)) continue;
+            int w = widthOf(decl->type);
+            if (w <= 0 || w > 64) continue;  // not something a Header can hold
+            FieldInfo fi{"$c" + std::to_string(nextTemp++) + "_" + dname, header_uid++, w, false};
+            temps.push_back(fi);
+            controlLocalHeaders[dname] = fi;
+        }
+    }
+
     // Deparser: the first control taking a packet_out.  b.emit(hdr.X) becomes
     // one EmitOpConstructor per field of X, in declaration order.
     bool preorder(const IR::P4Control *control) override {
@@ -1856,6 +1955,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             if (control->type->applyParams->parameters.size() >= 3) {
                 pipelineControls.push_back(control);
             }
+            declareControlLocals(control);
             return true;  // descend, so its actions and tables get visited
         }
         if (!deparserEmits.empty()) {
@@ -2067,6 +2167,18 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             if (lowerCall(mc, ops, g, out)) pushGroup(g, ops, out, mc);
             return;
         }
+        if (s->is<IR::ExitStatement>()) {
+            if (exitFlagUid == 0) {
+                FieldInfo fi{"$exit" + std::to_string(nextTemp++), header_uid++, 8, false};
+                temps.push_back(fi);
+                exitFlagUid = fi.uid;
+            }
+            std::vector<std::string> ops{"(StatelessOp AddOp W8 (OpConst 1) (OpConst 0) " +
+                                         pos_to_str(exitFlagUid) + ")"};
+            if (!pushGroup(g, ops, out, s)) return;
+            if (exitGroupIdx < 0) exitGroupIdx = static_cast<int>(out.size()) - 1;
+            return;
+        }
         if (s->is<IR::EmptyStatement>()) return;
         error("unsupported statement in an apply block: %1%", s);
     }
@@ -2106,20 +2218,33 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         if (!zeroing.empty()) groups.push_back(Group{Guard{}, {}, {Alt{{}, zeroing, 0}}});
 
         for (auto control : pipelineControls) {
-            // The frontend hoists a local out of the apply body into the
-            // control's declarations, so `bool is_sip = ...` arrives as a bare
-            // declaration here and a plain assignment there.
-            for (auto d : control->controlLocals) {
-                auto decl = d->to<IR::Declaration_Variable>();
-                if (decl == nullptr) continue;
-                std::string dname(decl->name.name.c_str());
-                if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
-                    pendingBoolLocals.insert(dname);
-                } else if (localHeaders.count(dname) == 0) {
-                    declareLocal(dname, widthOf(decl->type), decl);
+            // Its locals were declared when the control was visited; see
+            // [declareControlLocals], which has to run before the actions.
+            exitFlagUid = 0;
+            exitGroupIdx = -1;
+            size_t before = groups.size();
+            flattenStatement(control->body, Dnf{Guard{}}, groups);
+
+            if (exitGroupIdx >= 0) {
+                // Zero the flag ahead of everything, since a Header a
+                // transformer writes starts UninitVal rather than 0 -- and
+                // UninitVal matches nothing, so the guard below would never
+                // hold.
+                groups.insert(groups.begin() + before,
+                              Group{Guard{},
+                                    {},
+                                    {Alt{{},
+                                         {"(StatelessOp AddOp W8 (OpConst 0) (OpConst 0) " +
+                                          pos_to_str(exitFlagUid) + ")"},
+                                         0}}});
+                std::string stillRunning =
+                    atomSexp(exitFlagUid, "CmpEq", "(MatchConst 0 W8)");
+                // Everything after the exit runs only if it did not happen.
+                // +1 for the group just inserted.
+                for (size_t i = before + exitGroupIdx + 2; i < groups.size(); ++i) {
+                    groups[i].guard.pos.push_back(stillRunning);
                 }
             }
-            flattenStatement(control->body, Dnf{Guard{}}, groups);
         }
 
         // Adjacent statements under the same guard share a module: only one
