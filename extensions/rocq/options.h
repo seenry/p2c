@@ -24,6 +24,12 @@ class RocqOptions : public P4::CompilerOptions {
     // CoqVisitor::loadTableEntries for the format and for why they cannot
     // simply be left to the control plane.
     std::string tableEntries;
+
+    // Proceed past a checksum control instead of refusing.  See the comment
+    // where it is checked: the emitted packet then carries a stale checksum,
+    // which is only sound when both programs a comparison is about are stubbed
+    // the same way.
+    bool stubChecksum = false;
 };
 
 using RocqContext = P4::P4CContextWithOptions<RocqOptions>;

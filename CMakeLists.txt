@@ -244,7 +244,7 @@ list (APPEND P4C_LIB_DEPS ${Boost_LIBRARIES})
 if (ENABLE_GC)
   list (APPEND P4C_LIB_DEPS ${LIBGC_LIBRARIES})
 endif ()
-set (P4C_ABSL_LIBRARIES absl::flat_hash_map absl::flat_hash_set)
+set (P4C_ABSL_LIBRARIES absl::flat_hash_map absl::flat_hash_set absl::raw_hash_set absl::hash absl::low_level_hash absl::city absl::hashtablez_sampler)
 list (APPEND P4C_LIB_DEPS ${P4C_ABSL_LIBRARIES})
 
 # Other required libraries.

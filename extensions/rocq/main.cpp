@@ -208,7 +208,8 @@ static bool negateGuard(const Guard &in, Guard &out) {
 static const unsigned long long V1MODEL_DROP_PORT = 511;
 
 class CoqVisitor : public Inspector {
-    P4::TypeMap *typeMap;  // shared with the MidEnd; see the comment there
+    P4::TypeMap *typeMap;
+    bool stubChecksum = false;  // shared with the MidEnd; see the comment there
     std::ostringstream coqOutput;
     std::vector<std::string> actions;
     std::vector<std::string> tables;
@@ -342,7 +343,8 @@ class CoqVisitor : public Inspector {
     std::vector<std::string> deparserEmits;     // emitted EmitOpConstructor sexps
 
  public:
-    explicit CoqVisitor(P4::TypeMap *typeMap) : typeMap(typeMap) {}
+    CoqVisitor(P4::TypeMap *typeMap, bool stubChecksum)
+        : typeMap(typeMap), stubChecksum(stubChecksum) {}
     ~CoqVisitor() {}
 
     // Resolve a struct field's type to the header type it names, whether it is
@@ -1954,6 +1956,26 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             // roles are really written down.
             if (control->type->applyParams->parameters.size() >= 3) {
                 pipelineControls.push_back(control);
+            } else if (!control->body->components.empty()) {
+                // A control that is neither a pipeline stage nor the deparser
+                // is v1model's checksum verify or compute.  An empty one is
+                // nothing; a non-empty one is real behaviour, and dropping it
+                // silently would make the lowering wrong in a way no error
+                // reports -- the emitted packet would simply carry a stale
+                // checksum.  update_checksum expands to a ones-complement sum
+                // and is a piece of work in its own right.
+                if (stubChecksum) {
+                    warning(P4::ErrorType::WARN_IGNORE,
+                            "%1%: ignored, so the emitted packet carries a stale checksum. "
+                            "That is only sound if the program this is compared against is "
+                            "stubbed the same way",
+                            control->name);
+                } else {
+                    error("%1%: a checksum control is not supported, and ignoring it would "
+                          "silently leave the checksum field stale. --stub-checksum "
+                          "proceeds anyway",
+                          control->name);
+                }
             }
             declareControlLocals(control);
             return true;  // descend, so its actions and tables get visited
@@ -2412,7 +2434,7 @@ int main(int argc, char *const argv[]) {
     program = program->apply(P4::Rocq::MidEnd(&refMap, &typeMap));
     if (program == nullptr || P4::errorCount() > 0) return EXIT_FAILURE;
 
-    P4::Rocq::CoqVisitor coqVisitor(&typeMap);
+    P4::Rocq::CoqVisitor coqVisitor(&typeMap, options.stubChecksum);
     if (!options.tableEntries.empty() && !coqVisitor.loadTableEntries(options.tableEntries)) {
         return EXIT_FAILURE;
     }
