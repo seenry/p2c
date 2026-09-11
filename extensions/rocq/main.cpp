@@ -103,6 +103,57 @@ struct Group {
 // Two guards are the same guard if they read the same, which is a string
 // comparison because every atom is already rendered.  Used to merge adjacent
 // statements into one module rather than one module each.
+// Drop a negative clause the positives already rule out.
+//
+// A select's second case carries "and the first case missed", so the path to
+// basic_tunnel's parse_ipv4 through `TYPE_IPV4` arrives as
+// `etherType == IPV4 and not (etherType == MYTUNNEL)`.  That negation is
+// redundant -- a field cannot equal two different constants -- and leaving it
+// in matters: two disjuncts have to AGREE about what must not hold before they
+// can be two arms of one rule list, and without this they would not.
+//
+// Only single-atom clauses are dropped, and only against a positive atom on
+// the same header comparing equal to a different constant, which is the only
+// case where the contradiction is evident from the syntax alone.
+// Is this guard unsatisfiable on its face?  A negative clause that is exactly
+// a positive atom says "h == k and not h == k".  basic_tunnel produces one:
+// `hdr.ipv4.isValid() && !hdr.myTunnel.isValid()` crossed with the path that
+// reaches ipv4 THROUGH the tunnel, which is a packet whose myTunnel is valid.
+// That disjunct describes nothing and is dropped, leaving the direct path --
+// which is exactly what the source means.
+static bool guardIsImpossible(const Guard &g) {
+    for (const auto &clause : g.neg) {
+        if (clause.size() != 1) continue;
+        for (const auto &p : g.pos) {
+            if (clause[0] == p) return true;
+        }
+    }
+    return false;
+}
+
+static Guard simplifyGuard(const Guard &g) {
+    Guard out;
+    out.pos = g.pos;
+    for (const auto &clause : g.neg) {
+        bool impossible = false;
+        if (clause.size() == 1) {
+            for (const auto &p : g.pos) {
+                // Atoms render as "(Coq_pair (Coq_pair <h> Cmp..) <value>)", so
+                // same-header-different-value is a prefix match plus a
+                // difference, with both sides equality tests.
+                auto cut = [](const std::string &a) { return a.find(" CmpEq) "); };
+                size_t ci = cut(clause[0]), pi = cut(p);
+                if (ci == std::string::npos || pi == std::string::npos) continue;
+                if (ci != pi) continue;
+                if (clause[0].compare(0, ci, p, 0, pi) != 0) continue;  // different header
+                if (clause[0] != p) impossible = true;                  // different value
+            }
+        }
+        if (!impossible) out.neg.push_back(clause);
+    }
+    return out;
+}
+
 static bool sameGuard(const Guard &a, const Guard &b) {
     return a.pos == b.pos && a.neg == b.neg;
 }
@@ -119,6 +170,27 @@ static void mergeGuard(Guard &into, const Guard &g) {
 // DISJUNCTION, which is a conjunction again only in the two cases below.
 // Anything else would need the group duplicated once per disjunct, which is
 // not worth doing until a target needs it.
+// A condition in disjunctive normal form: the condition holds when ANY of
+// these guards does.  Most conditions are one guard.  Two things make them
+// plural: an `or` in the source, and a header that is valid by more than one
+// parse path -- SipHash extracts hdr.sip in two states, basic_tunnel reaches
+// parse_ipv4 two ways.
+using Dnf = std::vector<Guard>;
+
+// `(a or b) and (c or d)` is the cross product.
+static Dnf andDnf(const Dnf &a, const Dnf &b) {
+    Dnf out;
+    for (const auto &x : a) {
+        for (const auto &y : b) {
+            Guard g = x;
+            mergeGuard(g, y);
+            if (guardIsImpossible(g)) continue;  // this combination describes nothing
+            out.push_back(simplifyGuard(g));
+        }
+    }
+    return out;
+}
+
 static bool negateGuard(const Guard &in, Guard &out) {
     if (in.neg.empty() && !in.pos.empty()) {  // not (a and b)  ->  one neg clause
         out.neg.push_back(in.pos);
@@ -175,8 +247,16 @@ class CoqVisitor : public Inspector {
     // select this backend cannot read -- a header is valid for more than one
     // reason, which is a disjunction, and no guard here can say it.  Validity
     // is then refused rather than guessed.
-    std::map<std::string, Guard> validityOf;
-    bool parserIsTree = true;
+    // A header can be valid for more than one reason, so this is a list of
+    // disjuncts per instance rather than one guard.  Keeping only the first
+    // was an under-approximation, and a validity guard that is too narrow is
+    // as unsound as one that is too wide.
+    std::map<std::string, Dnf> validityOf;
+    // Set when validity cannot be a fixed predicate at all: a CYCLE, where the
+    // condition would be "on the nth time round" with one disjunct per
+    // iteration at a different cursor, or a select this backend cannot read.
+    // A merge is neither -- each path into it is simply another disjunct.
+    bool validityUnknown = false;
 
     // Boolean locals of a control, as GUARDS rather than values.
     //
@@ -187,7 +267,7 @@ class CoqVisitor : public Inspector {
     // it where the name is tested, keeps both the declaration and its uses
     // exact -- and `!is_sip` then negates through [negateGuard] like any other
     // condition.
-    std::map<std::string, Guard> boolLocals;
+    std::map<std::string, Dnf> boolLocals;
     // Boolean locals declared but not yet assigned.  The frontend splits
     // `bool is_sip = hdr.sip.isValid();` into a bare declaration and an
     // assignment, so the name has to be known before its guard is.
@@ -730,6 +810,24 @@ void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::str
                   pos_to_str(tgt->uid) + ")");
 }
 
+        // The negation of a condition.  `not (D1 or D2 or ...)` is
+    // `not D1 and not D2 and ...`, and each `not Di` is one negative clause --
+    // but only when Di is a conjunction of POSITIVES.  A disjunct that already
+    // carries a negation would come back as `(not A and not B) or (not C)`,
+    // and "fires when not C" is not a match pattern: a rule matches or it does
+    // not, and there is no trying the next disjunct.  Refused, not guessed.
+    static bool negateDnf(const Dnf &in, Dnf &out) {
+        if (in.empty()) return false;
+        Guard g;
+        for (const auto &d : in) {
+            if (!d.neg.empty()) return false;
+            if (d.pos.empty()) return false;  // negating `true`
+            g.neg.push_back(d.pos);
+        }
+        out.push_back(g);
+        return true;
+    }
+
     // Compute [e] into a fresh temporary tagged [ty] and return the Header's uid.
     int tempAt(const IR::Expression *e, const std::string &ty, std::vector<std::string> &ops) {
         std::string v = lowerExpr(e, ty, ops);
@@ -800,49 +898,58 @@ void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::str
     // A condition, as a guard.  Conjunctions merge; a negation flips; a comparison
     // is an atom; `isValid` is the parser's path condition (see [validityOf]).
     // Disjunction is refused rather than approximated.
-    bool lowerCondition(const IR::Expression *cond, Guard &g, std::vector<std::string> &setup) {
+    bool lowerCondition(const IR::Expression *cond, Dnf &out, std::vector<std::string> &setup) {
         if (auto land = cond->to<IR::LAnd>()) {
-            return lowerCondition(land->left, g, setup) && lowerCondition(land->right, g, setup);
+            Dnf a, b;
+            if (!lowerCondition(land->left, a, setup)) return false;
+            if (!lowerCondition(land->right, b, setup)) return false;
+            out = andDnf(a, b);
+            return true;
+        }
+        if (auto lor = cond->to<IR::LOr>()) {
+            Dnf a, b;
+            if (!lowerCondition(lor->left, a, setup)) return false;
+            if (!lowerCondition(lor->right, b, setup)) return false;
+            out = a;
+            out.insert(out.end(), b.begin(), b.end());
+            return true;
         }
         if (auto lnot = cond->to<IR::LNot>()) {
-            Guard inner;
+            Dnf inner;
             if (!lowerCondition(lnot->expr, inner, setup)) return false;
-            Guard negated;
-            if (!negateGuard(inner, negated)) {
-                error("cannot express the negation of %1% as a match pattern; it is a "
-                      "disjunction, and a MatchPattern is a conjunction",
+            if (!negateDnf(inner, out)) {
+                error("cannot express the negation of %1%: one of its disjuncts is itself "
+                      "negated, and a rule matches or it does not -- there is no trying the "
+                      "next disjunct",
                       lnot->expr);
                 return false;
             }
-            mergeGuard(g, negated);
             return true;
         }
-        if (cond->is<IR::LOr>()) {
-            error("a disjunction in a condition is not supported yet; it needs the "
-                  "statement duplicated once per disjunct: %1%",
-                  cond);
-            return false;
-        }
         if (auto b = cond->to<IR::BoolLiteral>()) {
-            if (b->value) return true;  // `true` adds nothing
+            if (b->value) {
+                out.push_back(Guard{});  // `true` constrains nothing
+                return true;
+            }
             error("a condition that is constantly false is not supported: %1%", cond);
             return false;
         }
         if (auto call = cond->to<IR::MethodCallExpression>()) {
             auto m = call->method->to<IR::Member>();
-            if (m != nullptr && m->member == "isValid") {
-                return validityGuard(m->expr, g);
-            }
+            if (m != nullptr && m->member == "isValid") return validityGuard(m->expr, out);
             error("unsupported call in a condition: %1%", cond);
             return false;
         }
         if (auto rel = cond->to<IR::Operation_Relation>()) {
-            return lowerRelation(rel, g, setup);
+            Guard g;
+            if (!lowerRelation(rel, g, setup)) return false;
+            out.push_back(g);
+            return true;
         }
         if (auto path = cond->to<IR::PathExpression>()) {
             auto it = boolLocals.find(std::string(path->path->name.name.c_str()));
             if (it != boolLocals.end()) {
-                mergeGuard(g, it->second);
+                out = it->second;
                 return true;
             }
         }
@@ -1251,7 +1358,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         return true;
     }
 
-    void lowerTableApply(const IR::P4Table *table, const Guard &g, std::vector<Group> &out) {
+    void lowerTableApply(const IR::P4Table *table, const Dnf &g, std::vector<Group> &out) {
         std::vector<std::string> setup;
 
         std::vector<KeyInfo> keys;
@@ -1316,8 +1423,17 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             if (!alt.ops.empty()) alts.push_back(alt);
         }
 
-        if (!setup.empty()) out.push_back(Group{g, {}, {Alt{{}, setup, 0}}});
-        if (!alts.empty()) out.push_back(Group{g, {}, alts});
+        if (!setup.empty()) pushGroup(g, setup, out, table);
+        if (alts.empty()) return;
+        if (g.size() != 1) {
+            // This Group's arms are already the table's entries, so a
+            // disjunctive path condition would have to be multiplied through
+            // them.  Expressible -- it is the cross product -- but nothing
+            // needs it, and getting it silently wrong is worse than saying so.
+            error("%1%: a table applied under a disjunction is not supported yet", table);
+            return;
+        }
+        out.push_back(Group{g[0], {}, alts});
     }
 
     // ------------------------------------------------------------------
@@ -1610,21 +1726,26 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
     void computeValidity(const IR::P4Parser *parser) {
         std::map<cstring, const IR::ParserState *> byName;
         for (auto st : parser->states) byName[st->name] = st;
-        std::set<cstring> seen;
-        walkParser(byName, cstring("start"), Guard{}, seen);
+        std::set<cstring> onPath;
+        walkParser(byName, cstring("start"), Guard{}, onPath);
     }
 
     void walkParser(const std::map<cstring, const IR::ParserState *> &byName, cstring name,
-                    const Guard &g, std::set<cstring> &seen) {
+                    const Guard &g, std::set<cstring> &onPath) {
         if (name == "accept" || name == "reject") return;
-        // Already reached by another path: this state's headers are valid for
-        // two different reasons, and their disjunction is not a guard.
-        if (!seen.insert(name).second) {
-            parserIsTree = false;
+        // A state already ON THE CURRENT PATH is a cycle, and validity below it
+        // is not a fixed predicate.  A state merely visited before is a MERGE,
+        // and is walked again: each way of reaching it is another disjunct,
+        // which is what a merge means.
+        if (!onPath.insert(name).second) {
+            validityUnknown = true;
             return;
         }
         auto it = byName.find(name);
-        if (it == byName.end()) return;
+        if (it == byName.end()) {
+            onPath.erase(name);
+            return;
+        }
         const IR::ParserState *st = it->second;
 
         for (auto c : st->components) {
@@ -1634,23 +1755,28 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             if (m == nullptr || m->member != "extract") continue;
             if (mc->methodCall->arguments->size() != 1) continue;
             std::string inst = instanceNameOf(mc->methodCall->arguments->at(0)->expression);
-            if (!inst.empty() && validityOf.count(inst) == 0) validityOf[inst] = g;
+            if (!inst.empty()) validityOf[inst].push_back(simplifyGuard(g));
         }
 
         const IR::Expression *sel = st->selectExpression;
-        if (sel == nullptr) return;
+        if (sel == nullptr) {
+            onPath.erase(name);
+            return;
+        }
         if (auto path = sel->to<IR::PathExpression>()) {
-            walkParser(byName, path->path->name, g, seen);
+            walkParser(byName, path->path->name, g, onPath);
+            onPath.erase(name);
             return;
         }
         auto select = sel->to<IR::SelectExpression>();
-        if (select == nullptr || select->select->components.size() != 1) {
-            parserIsTree = false;
-            return;
-        }
-        const FieldInfo *kf = lookupVar(select->select->components.at(0));
+        const FieldInfo *kf = (select == nullptr || select->select->components.size() != 1)
+                                  ? nullptr
+                                  : lookupVar(select->select->components.at(0));
         if (kf == nullptr) {
-            parserIsTree = false;
+            // A tuple select, or a key this backend cannot read: everything
+            // below is reached under a condition that cannot be written down.
+            validityUnknown = true;
+            onPath.erase(name);
             return;
         }
         std::string ty = containerFor(kf->width);
@@ -1664,8 +1790,8 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             if (!c->keyset->is<IR::DefaultExpression>()) {
                 auto k = c->keyset->to<IR::Constant>();
                 if (k == nullptr) {
-                    parserIsTree = false;
-                    return;
+                    validityUnknown = true;
+                    continue;
                 }
                 std::string atom = atomSexp(
                     kf->uid, "CmpEq",
@@ -1676,27 +1802,29 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             }
             auto tp = c->state->to<IR::PathExpression>();
             if (tp == nullptr) {
-                parserIsTree = false;
-                return;
+                validityUnknown = true;
+                continue;
             }
-            walkParser(byName, tp->path->name, cg, seen);
+            walkParser(byName, tp->path->name, cg, onPath);
         }
+        onPath.erase(name);
     }
 
-    bool validityGuard(const IR::Expression *hdrRef, Guard &g) {
+    bool validityGuard(const IR::Expression *hdrRef, Dnf &out) {
         std::string inst = instanceNameOf(hdrRef);
         auto it = validityOf.find(inst);
-        if (it == validityOf.end()) {
+        if (it == validityOf.end() || it->second.empty()) {
             error("cannot tell whether %1% is valid: no parser state extracts it", hdrRef);
             return false;
         }
-        if (!parserIsTree) {
-            error("cannot tell whether %1% is valid: the parser is not a tree, so its "
-                  "validity is a disjunction over paths and not a match pattern",
+        if (validityUnknown) {
+            error("cannot tell whether %1% is valid: this parser has a cycle, or a select "
+                  "this backend cannot read, so validity is not a fixed predicate over "
+                  "parsed fields",
                   hdrRef);
             return false;
         }
-        mergeGuard(g, it->second);
+        out = it->second;
         return true;
     }
 
@@ -1767,7 +1895,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
     // in a group.  A TABLE apply returns false having already pushed its own
     // groups onto [out] -- a table is many rules, not one op list.
     bool lowerCall(const IR::MethodCallStatement *mc, std::vector<std::string> &ops,
-                   const Guard &g, std::vector<Group> &out) {
+                   const Dnf &g, std::vector<Group> &out) {
         auto method = mc->methodCall->method;
         if (auto m = method->to<IR::Member>()) {
             if (m->member != "apply") {
@@ -1810,55 +1938,89 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
 
     // Flatten a statement into guarded groups.  The guard accumulated on the
     // way down is the statement's path condition; see the comment on [Guard].
-    void flattenStatement(const IR::StatOrDecl *s, const Guard &g, std::vector<Group> &out) {
+    // Emit one statement group under a path condition that may be a
+    // disjunction.  One disjunct is the ordinary case.  Several become several
+    // ARMS of one module carrying the same ops: the transformer runs whichever
+    // matches first, and since they do the same thing the order among them
+    // does not matter.
+    //
+    // Negative clauses cannot be split across arms -- they sit on the Group and
+    // are tried, as no-ops, ahead of every arm -- so a disjunction is emittable
+    // exactly when its disjuncts agree about what must NOT hold.  After
+    // [simplifyGuard] they do, for every disjunction reached from an `or` or
+    // from a header valid by several parse paths.
+    bool pushGroup(const Dnf &cond, const std::vector<std::string> &ops,
+                   std::vector<Group> &out, const IR::Node *at) {
+        if (ops.empty() || cond.empty()) return true;
+        if (cond.size() == 1) {
+            out.push_back(Group{cond[0], {}, {Alt{{}, ops, 0}}});
+            return true;
+        }
+        for (size_t i = 1; i < cond.size(); ++i) {
+            if (cond[i].neg != cond[0].neg) {
+                error("%1%: this runs under a disjunction whose branches disagree about "
+                      "what must not hold, which one rule list cannot say",
+                      at);
+                return false;
+            }
+        }
+        Guard shared;
+        shared.neg = cond[0].neg;
+        std::vector<Alt> alts;
+        for (const auto &d : cond) alts.push_back(Alt{d.pos, ops, 0});
+        out.push_back(Group{shared, {}, alts});
+        return true;
+    }
+
+    // Flatten a statement into guarded groups.  The condition accumulated on
+    // the way down is the statement's path condition; see [Guard] and [Dnf].
+    void flattenStatement(const IR::StatOrDecl *s, const Dnf &g, std::vector<Group> &out) {
         if (auto blk = s->to<IR::BlockStatement>()) {
             for (auto c : blk->components) flattenStatement(c, g, out);
             return;
         }
         if (auto ifs = s->to<IR::IfStatement>()) {
-            Guard cond;
+            Dnf cond;
             std::vector<std::string> setup;
             if (!lowerCondition(ifs->condition, cond, setup)) return;
-            // Whatever the condition had to compute runs UNGUARDED by the
-            // condition itself -- it is what the condition reads -- so it is a
-            // group of its own, ahead of both branches.
-            if (!setup.empty()) out.push_back(Group{g, {}, {Alt{{}, setup, 0}}});
+            // Whatever the condition had to compute runs ahead of both branches
+            // and unguarded by the condition itself -- it is what the condition
+            // reads -- so it is a group of its own.
+            if (!setup.empty()) pushGroup(g, setup, out, ifs);
 
-            Guard thenG = g;
-            mergeGuard(thenG, cond);
-            flattenStatement(ifs->ifTrue, thenG, out);
+            flattenStatement(ifs->ifTrue, andDnf(g, cond), out);
 
             if (ifs->ifFalse != nullptr) {
-                Guard notCond;
-                if (!negateGuard(cond, notCond)) {
+                Dnf notCond;
+                if (!negateDnf(cond, notCond)) {
                     error("cannot express the else branch of %1%: the negation of its "
-                          "condition is a disjunction",
+                          "condition is not a conjunction",
                           ifs->condition);
                     return;
                 }
-                Guard elseG = g;
-                mergeGuard(elseG, notCond);
-                flattenStatement(ifs->ifFalse, elseG, out);
+                flattenStatement(ifs->ifFalse, andDnf(g, notCond), out);
             }
             return;
         }
         if (auto decl = s->to<IR::Declaration_Variable>()) {
             std::string dname(decl->name.name.c_str());
+            bool isBool = canonicalTypeOf(decl->type)->is<IR::Type_Boolean>();
             if (decl->initializer == nullptr) {
-                if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
+                if (isBool) {
                     pendingBoolLocals.insert(dname);
                     return;
                 }
                 error("a local with no initializer is not supported here: %1%", decl);
                 return;
             }
-            // A boolean local is a named guard; anything else is a variable and
-            // gets a Header, like an action's local.
-            if (canonicalTypeOf(decl->type)->is<IR::Type_Boolean>()) {
-                Guard bg;
+            // A boolean local is a named CONDITION, not a value: there is no
+            // boolean in CrVal, and a validity test is a predicate over parsed
+            // fields rather than something the state holds.
+            if (isBool) {
+                Dnf bg;
                 std::vector<std::string> setup;
                 if (!lowerCondition(decl->initializer, bg, setup)) return;
-                if (!setup.empty()) out.push_back(Group{g, {}, {Alt{{}, setup, 0}}});
+                if (!setup.empty()) pushGroup(g, setup, out, decl);
                 boolLocals[dname] = bg;
                 return;
             }
@@ -1870,17 +2032,17 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             std::string dv = lowerExpr(decl->initializer, dty, dops);
             dops.push_back("(StatelessOp AddOp " + dty + " " + dv + " (OpConst 0) " +
                            pos_to_str(lit->second.uid) + ")");
-            out.push_back(Group{g, {}, {Alt{{}, dops, 0}}});
+            pushGroup(g, dops, out, decl);
             return;
         }
         if (auto assign = s->to<IR::AssignmentStatement>()) {
             if (auto lp = assign->left->to<IR::PathExpression>()) {
                 std::string lname(lp->path->name.name.c_str());
                 if (pendingBoolLocals.count(lname) || boolLocals.count(lname)) {
-                    Guard bg;
+                    Dnf bg;
                     std::vector<std::string> setup;
                     if (!lowerCondition(assign->right, bg, setup)) return;
-                    if (!setup.empty()) out.push_back(Group{g, {}, {Alt{{}, setup, 0}}});
+                    if (!setup.empty()) pushGroup(g, setup, out, assign);
                     boolLocals[lname] = bg;
                     pendingBoolLocals.erase(lname);
                     return;
@@ -1888,13 +2050,12 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             }
             std::vector<std::string> ops;
             lowerAssignment(assign, ops);
-            if (!ops.empty()) out.push_back(Group{g, {}, {Alt{{}, ops, 0}}});
+            pushGroup(g, ops, out, assign);
             return;
         }
         if (auto mc = s->to<IR::MethodCallStatement>()) {
             std::vector<std::string> ops;
-            if (lowerCall(mc, ops, g, out) && !ops.empty())
-                out.push_back(Group{g, {}, {Alt{{}, ops, 0}}});
+            if (lowerCall(mc, ops, g, out)) pushGroup(g, ops, out, mc);
             return;
         }
         if (s->is<IR::EmptyStatement>()) return;
@@ -1949,7 +2110,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
                     declareLocal(dname, widthOf(decl->type), decl);
                 }
             }
-            flattenStatement(control->body, Guard{}, groups);
+            flattenStatement(control->body, Dnf{Guard{}}, groups);
         }
 
         // Adjacent statements under the same guard share a module: only one
