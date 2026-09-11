@@ -97,25 +97,68 @@ the table is runtime-populated):
 | | `flowcache` — cloning |
 | | `p4runtime/advanced_tunnel` — `setValid`/`setInvalid`, and counters |
 
-Princeton-Cabernet/p4-projects, 0 of 19. Note when surveying these that p4c
-aborts after 20 errors with an uncaught exception, which looks like a crash and
-is not one — pass `--maxErrorCount 2000`. With that, 18 of the 19 finish in
-1–15s:
+Princeton-Cabernet/p4-projects, 1 of 19 — `ConQuest/baseline`. Note when
+surveying these that p4c aborts after 20 errors with an uncaught exception,
+which looks like a crash and is not one; pass `--maxErrorCount 2000`. With
+that, 18 of the 19 finish in 1–15s.
 
 - **Nine are rejected by p4c itself**, before this backend sees anything:
   `Meta4/netassay_*` (×4), `PRECISION`, `RTT` and `SmartCookie-CRC` /
   `SmartCookie-HalfSipHash` fail type inference on `RegisterAction`'s index
-  parameter, and `Fridge/UnbiasedRtt` is not self-contained — it needs headers
-  a Python generator produces. `p4test` fails on all nine the same way, so
-  these are not this backend's doing.
-- **Nine reach this backend** and stop on what it does not support: a hash, a
-  register, `setValid`/`setInvalid`, a `Random` extern, `exit`. Error counts
-  range from `ConQuest/baseline` at 2 — both a control-level local — through
-  `SipHash/halfsiphash24_ingressonly` at 7, to `p40f_tofino` at 276.
+  parameter, and `Fridge/UnbiasedRtt` needs headers a Python generator
+  produces. `p4test` fails on all nine the same way.
+- **Nine reach this backend:**
+
+  | | errors | stops on |
+  |---|---|---|
+  | `ConQuest/baseline` | — | lowers |
+  | `SipHash/halfsiphash24_ingressonly` | 3 | `setValid`/`setInvalid`, `Random` |
+  | `SipHash/siphash24_ingressonly` | 3 | the same |
+  | `SipHash/halfsiphash24_ingressegress` | 4 | the same, plus the egress pipeline |
+  | `AES-tofino/aes_oneround` | 22 | `setValid`, an extern in `apply`, and 17 tables whose entries a Python generator produces |
+  | `SmartCookie-AES` | 38 | as above |
+  | `AES-tofino/aes_tworound` | 38 | as above |
+  | `ONTAS/p4anony` | 56 | CRC externs in actions, assignments inside parser states |
+  | `P40f/p40f_tofino` | 276 | its TCP-option parser assigns and calls inside parser states |
+
 - **One does not terminate**: `AES.p4app/AES.p4`, still running after 150s.
-  It is v1model, and its tables are macro-expanded to hundreds of `const
-  entries`, so the cost is plausibly ahead of this backend rather than in it —
-  `p4test` alone does not finish either.
+  `p4test` alone does not finish it either, so the cost is plausibly upstream.
+
+## Outstanding work
+
+Roughly in order of value per unit of effort.
+
+1. **`Random`** — a free input the two compared programs *share*, which is the
+   right modelling for a relational check. Needs somewhere for a free value to
+   come from, which is the same metadata-prefix work `standard_metadata`'s
+   input fields need. Closes out the SipHash family bar validity.
+2. **Extern calls in an `apply` block or an action.** Today only
+   `mark_to_drop` is allowed. Recognising a `counter.count()` as a no-op with a
+   warning would be wrong; recognising it as a `MemRegion` store would not.
+   See `~/proj/ir` TODO.md 1.6.
+3. **Assignments and calls inside parser states.** A `ParserOp` is an extract
+   or a seek, so this is an IR limit rather than a backend gap — but it is 226
+   of `p40f`'s 276 errors, so it is worth knowing what a `SetOp` would cost
+   (`~/proj/ir` TODO.md 1.8 measures the validity half of that question).
+4. **Tuple `select`** — desugars to a chain of action-free states, which
+   `calc.p4` and several TNA parsers need.
+5. **`lookahead<T>()` into a temporary**, the other half of `calc.p4`.
+6. **The egress pipeline.** Only the first pipeline control is translated;
+   `halfsiphash24_ingressegress` wants both. The package instantiation is also
+   still unread, so ingress and egress are told apart by declaration order.
+7. **`standard_metadata_t` input fields** are uninitialized rather than free.
+   They are deliberately not zeroed — pinning `ingress_port` to 0 is a wronger
+   lie than leaving it undefined — but they should be extracted from a
+   metadata prefix ahead of the packet.
+8. **A `--field-table` sidecar.** The header allocation goes to stderr as
+   comments; written to a file it would make the `.ir` diffable and let a
+   reader map header 7 back to `ipv4.flags`. It is also how you would check
+   that two programs being compared agree about which uid means which field,
+   which is a front-end obligation nothing currently verifies.
+
+Blocked on the IR rather than on this backend: `setValid`/`setInvalid` and a
+deparser that emits only valid headers (`~/proj/ir` TODO.md 1.8), a hash,
+registers, header stacks, and cloning.
 
 ## Refused by name, and why
 
