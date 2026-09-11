@@ -318,6 +318,7 @@ class CoqVisitor : public Inspector {
     // Entries read from --table-entries, by table name.  Same representation
     // `const entries` reduces to, so both lower through one path.
     std::map<std::string, std::vector<RawEntry>> suppliedEntries;
+    bool haveEntriesFile = false;
 
     // Header TYPE declarations, by name, collected before the struct that
     // instantiates them (p4c visits declarations in program order).
@@ -1346,6 +1347,17 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
             if (it != suppliedEntries.end()) break;
         }
         if (it == suppliedEntries.end()) {
+            if (haveEntriesFile) {
+                // The file describes the whole configuration, so a table it
+                // does not mention is configured EMPTY -- only its default
+                // action applies.  That is a real state of a switch, and it is
+                // the one p4testgen picks whenever it explores a table miss.
+                warning(P4::ErrorType::WARN_MISSING,
+                        "no entries supplied for table %1%; treating it as empty, so only "
+                        "its default action applies",
+                        tname.c_str());
+                return true;
+            }
             error("table %1% has no `const entries` and none were supplied for it; pass "
                   "--table-entries FILE. A runtime-populated table cannot be lowered: a "
                   "Ctrl variable is seeded per program, so the two programs compared would "
@@ -1378,6 +1390,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
     // program: the solver would satisfy "the outputs differ" by giving the two
     // programs different tables.  TODO.md 1.7.
     bool loadTableEntries(const std::string &path) {
+        haveEntriesFile = true;
         std::ifstream in(path);
         if (!in.is_open()) {
             error("cannot open table entries file %1%", path.c_str());

@@ -121,6 +121,15 @@ if (TESTGEN_INCLUDES)
   target_include_directories(testgen ${TESTGEN_INCLUDES})
 endif()
 
+# The abseil headers have to be the in-tree ones.  Something on this module's
+# include path (an Anaconda prefix, pulled in by one of the packages this
+# module finds) ships a DIFFERENT abseil LTS, and since the release version is
+# an inline namespace, compiling against 20250127 while linking the 20240116
+# libraries p4c builds leaves every absl symbol undefined -- with names that
+# demangle identically, which makes it look like a missing library rather than
+# a mismatch.  BEFORE puts the fetched source ahead of it.
+target_include_directories(testgen BEFORE PRIVATE ${CMAKE_BINARY_DIR}/_deps/abseil-src)
+
 # The executable.
 add_p4tools_executable(p4testgen main.cpp)
 target_link_libraries(
