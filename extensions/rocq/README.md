@@ -97,18 +97,25 @@ the table is runtime-populated):
 | | `flowcache` — cloning |
 | | `p4runtime/advanced_tunnel` — `setValid`/`setInvalid`, and counters |
 
-Princeton-Cabernet/p4-projects, 0 of 19 — and mostly **not** for reasons this
-backend controls. Those programs were written for Barefoot's `bf-p4c`, and the
-open-source p4c in this submodule cannot get through most of them: `RTT`,
-`Meta4/netassay_*` and `PRECISION` fail type inference or segfault on Tofino
-externs (`RegisterAction`'s index parameter, `CRCPolynomial`), and `AES*`,
-`SmartCookie*`, `ONTAS` and `p40f` do not finish in 90s. `Fridge/UnbiasedRtt`
-is not self-contained — it needs headers a Python generator produces.
+Princeton-Cabernet/p4-projects, 0 of 19. Note when surveying these that p4c
+aborts after 20 errors with an uncaught exception, which looks like a crash and
+is not one — pass `--maxErrorCount 2000`. With that, 18 of the 19 finish in
+1–15s:
 
-Two get far enough for this backend to be the story:
-`SipHash/halfsiphash24_ingressonly` (needs `setValid`/`setInvalid`, a `Random`
-extern, `exit`, and a table applied under a disjunction) and
-`ConQuest/baseline` (two errors, both a control-level local).
+- **Nine are rejected by p4c itself**, before this backend sees anything:
+  `Meta4/netassay_*` (×4), `PRECISION`, `RTT` and `SmartCookie-CRC` /
+  `SmartCookie-HalfSipHash` fail type inference on `RegisterAction`'s index
+  parameter, and `Fridge/UnbiasedRtt` is not self-contained — it needs headers
+  a Python generator produces. `p4test` fails on all nine the same way, so
+  these are not this backend's doing.
+- **Nine reach this backend** and stop on what it does not support: a hash, a
+  register, `setValid`/`setInvalid`, a `Random` extern, `exit`. Error counts
+  range from `ConQuest/baseline` at 2 — both a control-level local — through
+  `SipHash/halfsiphash24_ingressonly` at 7, to `p40f_tofino` at 276.
+- **One does not terminate**: `AES.p4app/AES.p4`, still running after 150s.
+  It is v1model, and its tables are macro-expanded to hundreds of `const
+  entries`, so the cost is plausibly ahead of this backend rather than in it —
+  `p4test` alone does not finish either.
 
 ## Refused by name, and why
 
