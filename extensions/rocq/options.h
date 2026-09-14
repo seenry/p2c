@@ -30,6 +30,11 @@ class RocqOptions : public P4::CompilerOptions {
     // which is only sound when both programs a comparison is about are stubbed
     // the same way.
     bool stubChecksum = false;
+
+    // Model v1model's random() as writing its `lo` argument -- one outcome the
+    // spec permits.  A refinement, so it can witness a difference but never
+    // establish agreement.
+    bool randomIsLo = false;
 };
 
 using RocqContext = P4::P4CContextWithOptions<RocqOptions>;

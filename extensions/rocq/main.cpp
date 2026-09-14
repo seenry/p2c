@@ -209,7 +209,8 @@ static const unsigned long long V1MODEL_DROP_PORT = 511;
 
 class CoqVisitor : public Inspector {
     P4::TypeMap *typeMap;
-    bool stubChecksum = false;  // shared with the MidEnd; see the comment there
+    bool stubChecksum = false;
+    bool randomIsLo = false;  // shared with the MidEnd; see the comment there
     std::ostringstream coqOutput;
     std::vector<std::string> actions;
     std::vector<std::string> tables;
@@ -344,8 +345,8 @@ class CoqVisitor : public Inspector {
     std::vector<std::string> deparserEmits;     // emitted EmitOpConstructor sexps
 
  public:
-    CoqVisitor(P4::TypeMap *typeMap, bool stubChecksum)
-        : typeMap(typeMap), stubChecksum(stubChecksum) {}
+    CoqVisitor(P4::TypeMap *typeMap, bool stubChecksum, bool randomIsLo)
+        : typeMap(typeMap), stubChecksum(stubChecksum), randomIsLo(randomIsLo) {}
     ~CoqVisitor() {}
 
     // Resolve a struct field's type to the header type it names, whether it is
@@ -1088,6 +1089,10 @@ void lowerActionStatement(const IR::StatOrDecl *stmt, const std::string &actionN
         auto path = mc->methodCall->method->to<IR::PathExpression>();
         if (path != nullptr && path->path->name == "mark_to_drop") {
             lowerDrop(mc, ops);
+            return;
+        }
+        if (path != nullptr && path->path->name == "random" && randomIsLo) {
+            lowerRandom(mc, ops);
             return;
         }
         auto m = mc->methodCall->method->to<IR::Member>();
@@ -2051,6 +2056,23 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         return true;
     }
 
+    bool lowerRandom(const IR::MethodCallStatement *mc, std::vector<std::string> &ops) {
+        if (mc->methodCall->arguments->size() != 3) {
+            error("random takes three arguments: %1%", mc);
+            return false;
+        }
+        const FieldInfo *tgt = lookupVar(mc->methodCall->arguments->at(0)->expression);
+        if (tgt == nullptr) {
+            error("random's out argument is not a variable: %1%", mc);
+            return false;
+        }
+        std::string ty = containerFor(tgt->width);
+        std::string lo = lowerExpr(mc->methodCall->arguments->at(1)->expression, ty, ops);
+        ops.push_back("(StatelessOp AddOp " + ty + " " + lo + " (OpConst 0) " +
+                      pos_to_str(tgt->uid) + ")");
+        return true;
+    }
+
     // A call in an apply block: an action of this control, or [mark_to_drop].
     // Returns true when it filled [ops] with something the caller should wrap
     // in a group.  A TABLE apply returns false having already pushed its own
@@ -2082,6 +2104,16 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         std::string callee = path->path->name.name.c_str();
 
         if (callee == "mark_to_drop") return lowerDrop(mc, ops);
+
+        // v1model's `random(out T result, in T lo, in T hi)` draws uniformly
+        // from [lo, hi].  Under --random-is-lo it is modelled as writing `lo`,
+        // which is ONE of the outcomes the spec permits -- a refinement of the
+        // extern, not a faithful model of it.  That is enough to demonstrate a
+        // DIFFERENCE between two programs: if they disagree when the draw
+        // comes out lo, they disagree.  It is not enough to conclude two
+        // programs agree, and the flag exists so that is never accidental.
+        if (callee == "random" && randomIsLo) return lowerRandom(mc, ops);
+
 
         const std::vector<std::string> *aops = opsOfAction(callee);
         if (aops == nullptr) {
@@ -2464,7 +2496,7 @@ int main(int argc, char *const argv[]) {
     program = program->apply(P4::Rocq::MidEnd(&refMap, &typeMap));
     if (program == nullptr || P4::errorCount() > 0) return EXIT_FAILURE;
 
-    P4::Rocq::CoqVisitor coqVisitor(&typeMap, options.stubChecksum);
+    P4::Rocq::CoqVisitor coqVisitor(&typeMap, options.stubChecksum, options.randomIsLo);
     if (!options.tableEntries.empty() && !coqVisitor.loadTableEntries(options.tableEntries)) {
         return EXIT_FAILURE;
     }

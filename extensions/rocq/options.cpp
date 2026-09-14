@@ -27,5 +27,13 @@ RocqOptions::RocqOptions() : P4::CompilerOptions() {
         },
         "Warn rather than fail on a checksum control, leaving the checksum field stale.\n"
         "Sound only when both programs being compared are stubbed the same way.");
+    registerOption(
+        "--random-is-lo", nullptr,
+        [this](const char *) {
+            randomIsLo = true;
+            return true;
+        },
+        "Model random(out r, lo, hi) as r = lo, one outcome the spec permits.\n"
+        "A refinement: it can witness a difference, never establish agreement.");
 }
 }
