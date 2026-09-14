@@ -882,24 +882,41 @@ void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::str
     // carries a negation would come back as `(not A and not B) or (not C)`,
     // and "fires when not C" is not a match pattern: a rule matches or it does
     // not, and there is no trying the next disjunct.  Refused, not guessed.
+    // The negation of ONE guard, as a disjunction.
+    //
+    //   not (P and not N1 and not N2)  =  (not P) or N1 or N2
+    //
+    // and each of those is a guard: `not P` is a single negative clause, and
+    // each Ni is already a conjunction of atoms, so it becomes a positive
+    // disjunct.  Negating a guard therefore always succeeds -- what cannot be
+    // done is turning a disjunct that is ITSELF negated into a rule, and that
+    // is [pushGroup]'s problem rather than this one.
+    //
+    // Negating the empty guard -- `true` -- gives no disjuncts at all, which
+    // is `false`, and is right: the else branch of `if (true)` is unreachable.
+    static Dnf negateOneGuard(const Guard &g) {
+        Dnf out;
+        if (!g.pos.empty()) {
+            Guard n;
+            n.neg.push_back(g.pos);
+            out.push_back(n);
+        }
+        for (const auto &clause : g.neg) {
+            Guard p;
+            p.pos = clause;
+            out.push_back(p);
+        }
+        return out;
+    }
+
+    // ... and of a disjunction, by De Morgan: the negation of each disjunct,
+    // all conjoined, which [andDnf] does as the cross product.
     static bool negateDnf(const Dnf &in, Dnf &out) {
-        if (in.empty()) return false;
-        // `not (not C)` is C.  Dropping this case cost ConQuest's baseline.p4
-        // its else branch, since `x != 0` is stored as a negative clause and
-        // negating it is how the else branch is reached.
-        if (in.size() == 1 && in[0].pos.empty() && in[0].neg.size() == 1) {
-            Guard g;
-            g.pos = in[0].neg[0];
-            out.push_back(g);
-            return true;
+        if (in.empty()) return false;  // negating `false`; nothing needs it
+        out = negateOneGuard(in[0]);
+        for (size_t i = 1; i < in.size(); ++i) {
+            out = andDnf(out, negateOneGuard(in[i]));
         }
-        Guard g;
-        for (const auto &d : in) {
-            if (!d.neg.empty()) return false;
-            if (d.pos.empty()) return false;  // negating `true`
-            g.neg.push_back(d.pos);
-        }
-        out.push_back(g);
         return true;
     }
 
