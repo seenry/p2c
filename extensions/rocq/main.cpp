@@ -337,6 +337,14 @@ class CoqVisitor : public Inspector {
     // else -- but they are never extracted or emitted, so they are kept apart.
     std::vector<FieldInfo> temps;
 
+    // Intrinsic-metadata fields the program assigns to.  These are its OUTPUT
+    // besides the packet -- where the packet goes, and whether it is dropped
+    // -- and nothing in the IR observes them unless the deparser emits them.
+    // Without that, two programs that forward the same packet out of different
+    // ports compare equal, which is the whole behaviour of a forwarding
+    // program going unchecked.  See [appendMetadataEmits].
+    std::set<int> writtenIntrinsics;
+
     // Ingress parser and deparser, populated by their preorder visitors.
     int parsedBits = 0;  // see [inputLenBits]
     int nextParserLabel = 1;
@@ -875,6 +883,7 @@ void lowerAssignment(const IR::AssignmentStatement *assign, std::vector<std::str
     // names the destination.
     ops.push_back("(StatelessOp AddOp " + ty + " " + v + " (OpConst 0) " +
                   pos_to_str(tgt->uid) + ")");
+    noteWrite(tgt);
 }
 
         // The negation of a condition.  `not (D1 or D2 or ...)` is
@@ -1974,6 +1983,208 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         }
     }
 
+    // The emits of a deparser body, however that body is spelled.
+    //
+    // In source a deparser is a straight line of `b.emit(hdr.X)`.  p4c's
+    // midend wraps a control body into a @hidden action and then dispatches
+    // that action from a @hidden table (SynthesizeActions, then
+    // MoveActionsToTables), so the SAME deparser reads `tbl_d.apply();` after
+    // the midend, with every emit inside the action.  Both spellings have to
+    // land here.  Walking only the top-level statements and skipping what it
+    // did not recognise meant lowering p4c's own midend output produced a
+    // packet short by every header -- found by sweeping the midend passes,
+    // where ConQuest's emitted packet dropped from 32 fields to the 2 that
+    // appendMetadataEmits contributes.
+    //
+    // So an unrecognised statement is an ERROR, not a skip.  A dropped emit is
+    // invisible to the checker: two programs that both emit nothing agree, and
+    // a deparser is total, so a header that never reaches [deparserEmits] is
+    // not even zeroed bits in the output -- it is simply absent, with no
+    // diagnostic anywhere. See the both-reject note in CLAUDE.md.
+    bool collectDeparserEmits(const IR::P4Control *control, const IR::Statement *s, int depth) {
+        if (depth > 8) {
+            error("deparser %1%: gave up resolving nested action and table dispatch",
+                  control->name);
+            return false;
+        }
+        if (s->is<IR::EmptyStatement>()) return true;
+        if (auto b = s->to<IR::BlockStatement>()) {
+            for (auto c : b->components) {
+                auto st = c->to<IR::Statement>();
+                if (st == nullptr) {
+                    error("unsupported declaration in a deparser: %1%", c);
+                    return false;
+                }
+                if (!collectDeparserEmits(control, st, depth)) return false;
+            }
+            return true;
+        }
+        // TNA puts checksum computation IN the deparser -- `hdr.ipv4.hdr_checksum
+        // = ipv4_checksum.update({...})` -- where v1model gives it a control of
+        // its own.  Same situation, same answer, same flag: ignoring it leaves
+        // the emitted packet carrying a stale checksum, which is only sound if
+        // the program on the other side of the comparison is stubbed the same
+        // way.  It was silently dropped before this was a case at all.
+        if (auto as = s->to<IR::AssignmentStatement>()) {
+            auto rhs = as->right->to<IR::MethodCallExpression>();
+            if (rhs != nullptr && rhs->method->is<IR::Member>()) {
+                if (stubChecksum) {
+                    warning(P4::ErrorType::WARN_IGNORE,
+                            "%1%: ignored, so the emitted packet carries a stale checksum. "
+                            "That is only sound if the program this is compared against is "
+                            "stubbed the same way",
+                            as);
+                    return true;
+                }
+                error("%1%: computing a checksum in a deparser is not supported, and "
+                      "ignoring it would silently leave the checksum field stale. "
+                      "--stub-checksum proceeds anyway",
+                      as);
+                return false;
+            }
+        }
+        auto mc = s->to<IR::MethodCallStatement>();
+        if (mc == nullptr) {
+            error("unsupported statement in a deparser: %1%. The IR's deparser is total -- "
+                  "it emits every header it is given, valid or not -- so an emit that "
+                  "depends on a condition has no lowering",
+                  s);
+            return false;
+        }
+        auto method = mc->methodCall->method;
+        if (auto m = method->to<IR::Member>()) {
+            if (m->member == "emit") {
+                if (mc->methodCall->arguments->size() != 1) {
+                    error("emit takes one argument: %1%", mc);
+                    return false;
+                }
+                return collectEmitOf(mc->methodCall->arguments->at(0)->expression, mc);
+            }
+            if (m->member != "apply") {
+                error("unsupported method call in a deparser: %1%", mc);
+                return false;
+            }
+            auto tpath = m->expr->to<IR::PathExpression>();
+            auto decl = tpath == nullptr ? nullptr
+                                         : control->getDeclByName(tpath->path->name.name);
+            auto tbl = decl == nullptr ? nullptr : decl->to<IR::P4Table>();
+            if (tbl == nullptr) {
+                error("apply on something that is not a table of this deparser: %1%", mc);
+                return false;
+            }
+            return collectDeparserTable(control, tbl, depth + 1);
+        }
+        auto path = method->to<IR::PathExpression>();
+        auto decl = path == nullptr ? nullptr : control->getDeclByName(path->path->name.name);
+        auto act = decl == nullptr ? nullptr : decl->to<IR::P4Action>();
+        if (act == nullptr) {
+            error("unsupported call in a deparser: %1%; only an action of this control, a "
+                  "table of it, and emit have lowerings",
+                  mc);
+            return false;
+        }
+        if (!mc->methodCall->arguments->empty()) {
+            error("an action called with arguments is not supported in a deparser: %1%", mc);
+            return false;
+        }
+        return collectDeparserEmits(control, act->body, depth + 1);
+    }
+
+    // The only table shape a deparser can have: no key, no entries, one const
+    // default action -- which is exactly what MoveActionsToTables synthesizes.
+    // A table with a key would make the emits depend on a lookup, and a total
+    // deparser cannot say that.
+    bool collectDeparserTable(const IR::P4Control *control, const IR::P4Table *tbl, int depth) {
+        auto k = tbl->getKey();
+        if (k != nullptr && !k->keyElements.empty()) {
+            error("table %1% is applied in a deparser and has a key; the IR's deparser is "
+                  "total, so an emit that depends on a lookup has no lowering",
+                  tbl);
+            return false;
+        }
+        if (auto ents = tbl->getEntries()) {
+            if (!ents->entries.empty()) {
+                error("table %1% is applied in a deparser and has entries: %2%", tbl, ents);
+                return false;
+            }
+        }
+        auto da = tbl->getDefaultAction();
+        auto mce = da == nullptr ? nullptr : da->to<IR::MethodCallExpression>();
+        auto path = mce == nullptr ? nullptr : mce->method->to<IR::PathExpression>();
+        if (path == nullptr) {
+            error("table %1% is applied in a deparser and has no default action naming an "
+                  "action, so there is nothing it certainly does",
+                  tbl);
+            return false;
+        }
+        if (!mce->arguments->empty()) {
+            error("a deparser table's default action takes no arguments: %1%", da);
+            return false;
+        }
+        auto decl = control->getDeclByName(path->path->name.name);
+        auto act = decl == nullptr ? nullptr : decl->to<IR::P4Action>();
+        if (act == nullptr) {
+            error("%1% is not an action of this deparser", da);
+            return false;
+        }
+        return collectDeparserEmits(control, act->body, depth + 1);
+    }
+
+    // One EmitOpConstructor per field of the emitted instance, in declaration
+    // order.  An instance with no known fields is an error: it is the same
+    // silent shortening as a skipped statement.
+    bool collectEmitOf(const IR::Expression *arg, const IR::Node *at) {
+        // `pkt.emit(hdr)` over the whole header struct, which TNA programs
+        // write and p4c's ExpandEmit rewrites into one emit per instance.  Do
+        // the same expansion here, in declaration order, so the source and the
+        // post-midend spelling of one deparser lower to the same emit list.
+        // This used to fall through [fieldsOfInstance], which keys a header
+        // instance on its MEMBER name and so found nothing under the struct
+        // type -- ConQuest's ingress deparser therefore contributed no emits
+        // at all, and only the appended intrinsic metadata reached the wire.
+        if (typeMap != nullptr) {
+            auto t = canonicalTypeOf(typeMap->getType(arg, false));
+            if (auto st = t == nullptr ? nullptr : t->to<IR::Type_Struct>()) {
+                bool any = false;
+                for (auto f : st->fields) {
+                    if (headerTypeOf(f->type) == nullptr) continue;
+                    for (const auto &q : fieldsOfInstance(std::string(f->name.name.c_str()))) {
+                        const FieldInfo *fi = lookupField(q);
+                        if (fi == nullptr) continue;
+                        deparserEmits.push_back("(EmitOpConstructor " + pos_to_str(fi->uid) +
+                                                " " + std::to_string(fi->width) + ")");
+                        any = true;
+                    }
+                }
+                if (!any) {
+                    error("emit of %1%, a struct holding no header this lowering knows; it "
+                          "would silently shorten the emitted packet",
+                          at);
+                    return false;
+                }
+                return true;
+            }
+        }
+        std::string inst = instanceNameOf(arg);
+        std::vector<std::string> fields = fieldsOfInstance(inst);
+        if (fields.empty()) {
+            error("emit of %1%, which has no fields this lowering knows; it would silently "
+                  "shorten the emitted packet",
+                  at);
+            return false;
+        }
+        for (const auto &q : fields) {
+            const FieldInfo *fi = lookupField(q);
+            if (fi == nullptr) {
+                error("emit of %1%: no Header was allocated for field %2%", at, q.c_str());
+                return false;
+            }
+            deparserEmits.push_back("(EmitOpConstructor " + pos_to_str(fi->uid) + " " +
+                                    std::to_string(fi->width) + ")");
+        }
+        return true;
+    }
+
     // Deparser: the first control taking a packet_out.  b.emit(hdr.X) becomes
     // one EmitOpConstructor per field of X, in declaration order.
     bool preorder(const IR::P4Control *control) override {
@@ -2021,19 +2232,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
                     control->name);
             return false;
         }
-        for (auto c : control->body->components) {
-            auto mc = c->to<IR::MethodCallStatement>();
-            if (mc == nullptr) continue;
-            auto m = mc->methodCall->method->to<IR::Member>();
-            if (m == nullptr || m->member != "emit") continue;
-            if (mc->methodCall->arguments->size() != 1) continue;
-            std::string inst = instanceNameOf(mc->methodCall->arguments->at(0)->expression);
-            for (const auto &q : fieldsOfInstance(inst)) {
-                const FieldInfo *fi = lookupField(q);
-                deparserEmits.push_back("(EmitOpConstructor " + pos_to_str(fi->uid) + " " +
-                                        std::to_string(fi->width) + ")");
-            }
-        }
+        collectDeparserEmits(control, control->body, 0);
         return false;
     }
 
@@ -2053,6 +2252,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         std::string ty = containerFor(fi->width);
         ops.push_back("(StatelessOp AddOp " + ty + " " + constOperand(V1MODEL_DROP_PORT) +
                       " (OpConst 0) " + pos_to_str(fi->uid) + ")");
+        noteWrite(fi);
         return true;
     }
 
@@ -2071,6 +2271,49 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
         ops.push_back("(StatelessOp AddOp " + ty + " " + lo + " (OpConst 0) " +
                       pos_to_str(tgt->uid) + ")");
         return true;
+    }
+
+    // Is this a field of an architecture's intrinsic metadata -- the structs
+    // through which a program tells the switch what to do with the packet --
+    // rather than the program's own scratch?  Emitting a program's scratch
+    // would be wrong: two programs are free to use different temporaries and
+    // still behave identically.
+    static bool isIntrinsicStruct(const std::string &qualified) {
+        static const char *kinds[] = {
+            "standard_metadata_t.",                        // v1model
+            "ingress_intrinsic_metadata_for_tm_t.",        // TNA
+            "ingress_intrinsic_metadata_for_deparser_t.",
+            "egress_intrinsic_metadata_for_deparser_t.",
+            "egress_intrinsic_metadata_for_output_port_t.",
+        };
+        for (const char *k : kinds) {
+            if (qualified.rfind(k, 0) == 0) return true;
+        }
+        return false;
+    }
+
+    void noteWrite(const FieldInfo *fi) {
+        if (fi != nullptr && !fi->onWire && isIntrinsicStruct(fi->qualified)) {
+            writtenIntrinsics.insert(fi->uid);
+        }
+    }
+
+    // Append the written intrinsic-metadata fields to the deparser, so the
+    // forwarding decision is part of what the checker compares.  They go AFTER
+    // the program's own emits, so the packet the program builds is a prefix of
+    // the compared output and a differential test against a real switch can
+    // still line the two up.  Only fields the program writes are emitted:
+    // emitting the whole struct would make two programs differ over an input
+    // neither of them touched.
+    void appendMetadataEmits() {
+        for (int uid : writtenIntrinsics) {
+            for (const auto &f : fields) {
+                if (f.uid != uid) continue;
+                deparserEmits.push_back("(EmitOpConstructor " + pos_to_str(f.uid) + " " +
+                                        std::to_string(f.width) + ")");
+                break;
+            }
+        }
     }
 
     // A call in an apply block: an action of this control, or [mark_to_drop].
@@ -2398,6 +2641,7 @@ const std::vector<FieldInfo> *paramsOfAction(const std::string &name) const {
     // traversal any more, so nothing here has to clear it.
     void finalize() {
         std::vector<Group> groups = lowerPipelineControls();
+        appendMetadataEmits();
 
         const int parserId = 1;
         const int deparserId = 2;
