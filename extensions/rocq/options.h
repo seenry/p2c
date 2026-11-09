@@ -2,6 +2,8 @@
 #define _ROCQS_OPTIONS_H_
 
 #include "frontends/common/options.h"
+#include <string>
+
 #include "frontends/common/parser_options.h"
 
 namespace P4::Rocq {
@@ -17,6 +19,22 @@ class RocqOptions : public P4::CompilerOptions {
     RocqOptions &operator=(RocqOptions &&) = delete;
 
     bool useFixed = false;
+
+    // Entries for tables the P4 source does not populate itself.  See
+    // CoqVisitor::loadTableEntries for the format and for why they cannot
+    // simply be left to the control plane.
+    std::string tableEntries;
+
+    // Proceed past a checksum control instead of refusing.  See the comment
+    // where it is checked: the emitted packet then carries a stale checksum,
+    // which is only sound when both programs a comparison is about are stubbed
+    // the same way.
+    bool stubChecksum = false;
+
+    // Model v1model's random() as writing its `lo` argument -- one outcome the
+    // spec permits.  A refinement, so it can witness a difference but never
+    // establish agreement.
+    bool randomIsLo = false;
 };
 
 using RocqContext = P4::P4CContextWithOptions<RocqOptions>;

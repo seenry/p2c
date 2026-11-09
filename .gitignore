@@ -18,6 +18,8 @@ unified-compilation.am
 *.json.p4
 *p4.json
 build/
+# a CMake install prefix, i.e. the built binaries again
+install/
 *.pyc
 # testing may generate packet observation logs
 *.obs
